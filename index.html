@@ -164,7 +164,7 @@
                 <!-- Login/Logout Status -->
                 <div class="mt-4 text-center">
                     <span id="authStatus" class="text-sm text-gray-500">
-                        <a href="#" onclick="handleLogout(); return false;" class="text-blue-400 hover:text-blue-300" data-i18n="login">Login</a>
+                        <a href="#" onclick="oktaLogin(); return false;" class="text-blue-400 hover:text-blue-300" data-i18n="login">Login</a>
                         <span class="mx-2">|</span>
                         <a href="#" onclick="handleLogout(); return false;" class="text-gray-400 hover:text-gray-300" data-i18n="logout">Logout</a>
                     </span>
@@ -346,12 +346,12 @@
 
         // Handle logout
         function handleLogout() {
-            alert(translations[currentLang].logoutClicked);
+            window.location.href = 'https://nhp.opennhp.org/plugins/okta?resid=demo&action=logout';
         }
 
         // Okta login
         function oktaLogin() {
-            alert(translations[currentLang].redirectOkta);
+            window.location.href = 'https://nhp.opennhp.org/plugins/okta?resid=demo&action=oauth';
         }
 
         // Scan ports
