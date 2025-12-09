@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hello World</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        display: ['Playfair Display', 'serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        @keyframes gradient-shift {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        .animated-bg {
+            background: linear-gradient(-45deg, #0f172a, #1e3a5f, #0d9488, #0f172a);
+            background-size: 400% 400%;
+            animation: gradient-shift 12s ease infinite;
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-20px); }
+        }
+        .floating { animation: float 4s ease-in-out infinite; }
+    </style>
+</head>
+<body class="animated-bg min-h-screen flex items-center justify-center overflow-hidden">
+    
+    <!-- Decorative elements -->
+    <div class="absolute inset-0 overflow-hidden pointer-events-none">
+        <div class="absolute top-20 left-20 w-72 h-72 bg-teal-500/10 rounded-full blur-3xl"></div>
+        <div class="absolute bottom-20 right-20 w-96 h-96 bg-cyan-400/10 rounded-full blur-3xl"></div>
+        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-emerald-500/5 rounded-full blur-3xl"></div>
+    </div>
+
+    <!-- Main content -->
+    <main class="relative z-10 text-center px-6">
+        <div class="floating">
+            <h1 class="font-display text-7xl md:text-9xl text-white mb-6 tracking-tight">
+                Hello <span class="text-teal-400">World</span>
+            </h1>
+        </div>
+        
+        <p class="font-mono text-slate-300 text-lg md:text-xl max-w-xl mx-auto mb-10 leading-relaxed">
+            Welcome to my static website hosted on GitHub Pages.
+        </p>
+
+        <div class="flex justify-center gap-4">
+            <a href="https://github.com" 
+               class="group relative px-8 py-3 bg-white/10 backdrop-blur-sm border border-white/20 rounded-full text-white font-mono text-sm hover:bg-white/20 transition-all duration-300">
+                <span class="relative z-10">Explore →</span>
+            </a>
+        </div>
+
+        <!-- Code snippet decoration -->
+        <div class="mt-16 inline-block text-left bg-slate-900/60 backdrop-blur-md rounded-xl p-6 border border-slate-700/50">
+            <div class="flex gap-2 mb-4">
+                <span class="w-3 h-3 rounded-full bg-red-500"></span>
+                <span class="w-3 h-3 rounded-full bg-yellow-500"></span>
+                <span class="w-3 h-3 rounded-full bg-green-500"></span>
+            </div>
+            <code class="font-mono text-sm">
+                <span class="text-pink-400">console</span><span class="text-white">.</span><span class="text-teal-400">log</span><span class="text-white">(</span><span class="text-amber-300">"Hello, World!"</span><span class="text-white">);</span>
+            </code>
+        </div>
+    </main>
+
+</body>
+</html>
+
