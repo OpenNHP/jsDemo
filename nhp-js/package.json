@@ -12,6 +12,9 @@
     "vite": "^7.2.4"
   },
   "dependencies": {
-    "crypto-js": "^4.2.0"
+    "@noble/ciphers": "^2.1.1",
+    "@noble/curves": "^2.0.1",
+    "crypto-js": "^4.2.0",
+    "gm-crypto": "^0.1.12"
   }
 }

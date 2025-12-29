@@ -1,9 +1,9 @@
 import CryptoJS from "crypto-js"
-//import { chacha20poly1305 } from "https://cdn.jsdelivr.net/npm/@noble/ciphers@2.0.1/chacha.js/+esm";
-import { bytesToBase64, base64ToBytes} from "utils.js"
+import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { bytesToBase64, base64ToBytes} from "./utils.js"
 
 export async function generateX25519KeyPair() {
-  const keyPair = await window.crypto.subtle.generateKey(
+  return await window.crypto.subtle.generateKey(
     { name: "X25519" },
     true, // extractable
     ["deriveBits", "deriveKey"]
@@ -55,7 +55,7 @@ export async function x25519PublicKeyToBytes(key) {
 export async function bytesToX25519PublicKey(bytes) {
   return await window.crypto.subtle.importKey(
     "raw", // format
-    bytes.buffer, // keyData
+    bytes, // keyData
     { name: "X25519" }, // algorithm
     true, // extractable
     [] // key usages (public keys usually have no usage on their own)
@@ -186,12 +186,12 @@ export async function x25519PrivateKeyToBytes(key) {
   return extractX25519FromPKCS8(pkcs8Key);
 }
 
-export async function base64To25519PrivateKey(b64) {
+export async function base64ToX25519PrivateKey(b64) {
   const bytes = base64ToBytes(b64);
   return await bytesToX25519PrivateKey(bytes);
 }
 
-export async function base64To25519PublicKey(b64) {
+export async function base64ToX25519PublicKey(b64) {
   const bytes = base64ToBytes(b64);
   return await bytesToX25519PublicKey(bytes);
 }
@@ -246,14 +246,14 @@ export function sumSHA256(hasher) {
 }
 
 export function hmac1(key, msg) {
-  const hmacHasher = CryptoJS.algo.HMAC.create(CryptoJS.algo.SHA256, key);
+  const hmacHasher = CryptoJS.algo.HMAC.create(CryptoJS.algo.SHA256, uint8ArrayToWordArray(key));
   hmacHasher.update(uint8ArrayToWordArray(msg));
   const hmac = hmacHasher.finalize();
   return wordArrayToUint8Array(hmac);
 }
 
 export function hmac2(key, msg0, msg1) {
-	const hmacHasher = CryptoJS.algo.HMAC.create(CryptoJS.algo.SHA256, key);
+	const hmacHasher = CryptoJS.algo.HMAC.create(CryptoJS.algo.SHA256, uint8ArrayToWordArray(key));
   hmacHasher.update(uint8ArrayToWordArray(msg0));
   hmacHasher.update(uint8ArrayToWordArray(msg1));
   const hmac = hmacHasher.finalize();
@@ -305,37 +305,14 @@ export async function bytesToChacha20AEADKey(bytes) {
   );
 }
 
-export async function chacha20Seal(keyBytes, nonce, plaintext, additionalData) {
-  const key = await bytesToChacha20AEADKey(keyBytes)
-
-  // SubtleCrypto.encrypt returns ArrayBuffer
-  const ciphertextWithTag = await window.crypto.subtle.encrypt(
-    {
-    name: "ChaCha20-Poly1305",
-    nonce: nonce, // 12-byte IV/Nonce
-    // additionalData is optional, but highly recommended for AEAD
-    additionalData: additionalData 
-    },
-    key,
-    plaintext
-  );
-  
-  return new Uint8Array(ciphertextWithTag);
+export function chacha20Seal(key, nonce, plainData, additionalData) {
+  const cipher = chacha20poly1305(key, nonce, additionalData);
+  const buf = new Uint8Array(plainData.byteLength + 16)
+  return cipher.encrypt(plainData, buf);
 }
 
-export async function chacha20Open(keyBytes, nonce, ciphertextWithTag, additionalData) {
-  const key = bytesToChacha20AEADKey(keyBytes)
-
-  // SubtleCrypto.decrypt returns ArrayBuffer
-  const plaintext = await window.crypto.subtle.decrypt(
-    {
-    name: "ChaCha20-Poly1305",
-    nonce: nonce,
-    additionalData: additionalData
-    },
-    key,
-    ciphertextWithTag
-  );
-  
-  return new Uint8Array(plaintext);
+export function chacha20Open(key, nonce, ciphertextWithTag, additionalData) {
+  const cipher = chacha20poly1305(key, nonce, additionalData);
+  const buf = new Uint8Array(ciphertextWithTag.byteLength - 16)
+  return cipher.decrypt(ciphertextWithTag, buf);
 }
