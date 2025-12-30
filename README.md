@@ -8,18 +8,6 @@ A demonstration web application for the [OpenNHP](https://github.com/OpenNHP/ope
 
 This demo showcases the OpenNHP authentication flow and connection status visualization. OpenNHP is a zero-trust network security protocol that hides protected servers from unauthorized access.
 
-### Local Development
-
-Simply open `index.html` in your browser, or use a local server:
-
-```bash
-# Using Python
-python -m http.server 8000
-
-# Using Node.js
-npx serve
-```
-
 ### Deployment
 
 This project is deployed via GitHub Pages. Any push to the `main` branch will automatically deploy to [jsdemo.opennhp.org](https://jsdemo.opennhp.org).
