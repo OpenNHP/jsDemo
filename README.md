@@ -2,7 +2,7 @@
 
 The Javascript version of NHP-Agent and its usage demonstration.
 
-🌐 **Live Demo:** [https://jsdemo.opennhp.org](https://js-agent.opennhp.org)
+🌐 **Live Demo:** [https://js-agent.opennhp.org](https://js-agent.opennhp.org)
 
 ## Overview
 
