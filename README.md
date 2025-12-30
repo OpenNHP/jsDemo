@@ -1,8 +1,8 @@
-# OpenNHP JavaScript SDK Demo
+# OpenNHP Agent JavaScript SDK 
 
-A demonstration web application for the [OpenNHP](https://github.com/OpenNHP/opennhp) JavaScript SDK.
+The Javascript version of NHP-Agent and its usage demonstration.
 
-🌐 **Live Demo:** [https://jsdemo.opennhp.org](https://jsdemo.opennhp.org)
+🌐 **Live Demo:** [https://jsdemo.opennhp.org](https://js-agent.opennhp.org)
 
 ## Overview
 
@@ -15,7 +15,7 @@ This project is deployed via GitHub Pages. Any push to the `main` branch will au
 ## Project Structure
 
 ```
-jsDemo/
+js-agent/
 ├── index.html    # Main application file
 ├── CNAME         # Custom domain configuration
 ├── LICENSE       # License file
