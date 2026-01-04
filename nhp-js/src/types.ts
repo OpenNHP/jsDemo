@@ -8,6 +8,9 @@ export type CipherScheme = 'curve25519' | 'gmsm';
 /** Log level for SDK output */
 export type LogLevel = 'silent' | 'error' | 'info' | 'debug';
 
+/** Transport type for NHP communication */
+export type TransportType = 'udp' | 'webrtc' | 'websocket';
+
 /** Configuration for initializing the NHP Agent */
 export interface NHPAgentConfig {
   /** Base64-encoded private key. If not provided, one will be generated */
@@ -16,6 +19,8 @@ export interface NHPAgentConfig {
   cipherScheme?: CipherScheme;
   /** Logging level */
   logLevel?: LogLevel;
+  /** Transport type to use (default: 'udp' for Node.js, 'webrtc' for browser) */
+  transport?: TransportType;
 }
 
 /** Configuration for an NHP server */

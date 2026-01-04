@@ -16,17 +16,34 @@ import type {
   ServerKnockAckMsg,
   AgentIdentity,
   ParsedPacket,
+  TransportType,
 } from './types.js';
 import { generateX25519KeyPairBase64, derivePublicKeyFromBase64 } from './crypto/ecdh.js';
 import { randomBytes, bytesToHex } from './crypto/utils.js';
 import { buildNHPPacket, parseNHPPacket, clearServerCookie } from './protocol/packet.js';
 import { NHP_PACKET_TYPES } from './protocol/constants.js';
 import { WebSocketTransport } from './transport/websocket.js';
+import { UdpTransport } from './transport/udp.js';
+import { WebRTCTransport } from './transport/webrtc.js';
+
+/** Common transport interface */
+interface Transport {
+  connect(): Promise<void>;
+  disconnect(): void;
+  send(data: Uint8Array): void;
+  on(event: string, handler: (data: unknown) => void): void;
+  off(event: string, handler: (data: unknown) => void): void;
+  isConnected(): boolean;
+}
+
+/** Detect if running in browser or Node.js */
+const isBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
 
 /** Default agent configuration */
 const DEFAULT_CONFIG: Required<Omit<NHPAgentConfig, 'privateKey'>> = {
   cipherScheme: 'curve25519',
   logLevel: 'error',
+  transport: isBrowser ? 'webrtc' : 'udp',
 };
 
 /**
@@ -71,7 +88,7 @@ export class NHPAgent {
   private keyPair: KeyPairBase64 | null = null;
   private identity: AgentIdentity | null = null;
   private servers: Map<string, ServerConfig> = new Map();
-  private transports: Map<string, WebSocketTransport> = new Map();
+  private transports: Map<string, Transport> = new Map();
   private eventHandlers: Map<NHPAgentEvent, Set<EventHandler>> = new Map();
   private initialized = false;
 
@@ -335,13 +352,7 @@ export class NHPAgent {
     const serverId = `${resource.serverHost}:${resource.serverPort}`;
     let transport = this.transports.get(serverId);
     if (!transport) {
-      // Note: This uses WebSocket which Go server doesn't support.
-      // Should be replaced with UDP or WebRTC transport.
-      const wsUrl = `wss://${resource.serverHost}:${resource.serverPort}/nhp`;
-      transport = new WebSocketTransport({
-        url: wsUrl,
-        autoReconnect: false,
-      });
+      transport = this.createTransport(resource.serverHost, resource.serverPort);
       this.transports.set(serverId, transport);
     }
 
@@ -382,8 +393,35 @@ export class NHPAgent {
     }
   }
 
+  private createTransport(host: string, port: number): Transport {
+    const transportType = this.config.transport;
+
+    switch (transportType) {
+      case 'udp':
+        this.log('debug', `Creating UDP transport to ${host}:${port}`);
+        return new UdpTransport({ host, port }) as Transport;
+
+      case 'webrtc':
+        this.log('debug', `Creating WebRTC transport to ${host}:${port}`);
+        // WebRTC requires signaling - use HTTP signaling endpoint
+        return new WebRTCTransport({
+          signalingUrl: `https://${host}:${port}/webrtc/signal`,
+        }) as Transport;
+
+      case 'websocket':
+        this.log('debug', `Creating WebSocket transport to ${host}:${port}`);
+        return new WebSocketTransport({
+          url: `wss://${host}:${port}/nhp`,
+          autoReconnect: false,
+        }) as Transport;
+
+      default:
+        throw new Error(`Unsupported transport type: ${transportType}`);
+    }
+  }
+
   private async sendAndWaitForResponse(
-    transport: WebSocketTransport,
+    transport: Transport,
     packet: Uint8Array,
     serverPublicKey: string
   ): Promise<ParsedPacket> {

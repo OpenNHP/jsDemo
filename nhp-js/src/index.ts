@@ -43,6 +43,7 @@ export { NHPAgent } from './NHPAgent.js';
 export type {
   CipherScheme,
   LogLevel,
+  TransportType,
   NHPAgentConfig,
   ServerConfig,
   ResourceConfig,
