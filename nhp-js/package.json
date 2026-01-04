@@ -30,7 +30,17 @@
     "opennhp",
     "zero-trust",
     "network-security",
-    "cryptography"
+    "cryptography",
+    "x25519",
+    "blake2s",
+    "aes-gcm",
+    "sm2",
+    "sm3",
+    "sm4",
+    "gmsm",
+    "noise-protocol",
+    "webrtc",
+    "authentication"
   ],
   "author": "OpenNHP",
   "license": "Apache-2.0",
