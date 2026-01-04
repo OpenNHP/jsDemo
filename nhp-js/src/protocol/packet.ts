@@ -1,6 +1,7 @@
 /**
  * NHP Packet Building and Parsing
  * Implements the core NHP protocol packet operations
+ * Uses Blake2s + AES-256-GCM to match Go NHP implementation
  */
 
 import type { PacketType, ParsedPacket } from '../types.js';
@@ -17,18 +18,14 @@ import {
   FLOOD_PACKET_THRESHOLD_NS,
 } from './constants.js';
 import {
-  generateX25519KeyPair,
-  ecdhX25519,
-  x25519PublicKeyToBytes,
-  base64ToX25519PublicKey,
-  base64ToX25519PrivateKey,
-  bytesToX25519PublicKey,
+  generateX25519KeyPairRaw,
+  ecdhX25519Raw,
 } from '../crypto/ecdh.js';
-import { chacha20Seal, chacha20Open } from '../crypto/aead.js';
+import { aesGcmSeal, aesGcmOpen } from '../crypto/aead.js';
 import {
-  newSHA256Hash,
-  updateSHA256,
-  sumSHA256,
+  newBlake2sHash,
+  updateBlake2s,
+  sumBlake2s,
   keyGen2,
   mixKey,
 } from '../crypto/noise.js';
@@ -74,10 +71,8 @@ export async function buildNHPPacket(
   const packet = new Uint8Array(PACKET_BUFFER_SIZE);
   const header = new NHPHeader(packet.buffer);
 
-  const localPrivKey = await base64ToX25519PrivateKey(privateKey);
-  const localPubKey = await base64ToX25519PublicKey(publicKey);
-  const remotePubKey = await base64ToX25519PublicKey(remotePublicKey);
-
+  // Convert keys from base64 to raw bytes
+  const localPrivKeyBytes = base64ToBytes(privateKey);
   const localPubKeyBytes = base64ToBytes(publicKey);
   const remotePubKeyBytes = base64ToBytes(remotePublicKey);
   const msgBytes = stringToBytes(message);
@@ -92,45 +87,43 @@ export async function buildNHPPacket(
   // Initialize chain key and hash
   const chainKey = new Uint8Array(32);
   const chainHash = new Uint8Array(32);
-  const hmacHasher = newSHA256Hash();
-  const chainHasher = newSHA256Hash();
+  const hmacHasher = newBlake2sHash();
+  const chainHasher = newBlake2sHash();
 
   // Initialize with protocol strings
-  updateSHA256(hmacHasher, stringToBytes(INITIAL_HASH_STRING));
-  updateSHA256(chainHasher, stringToBytes(INITIAL_HASH_STRING));
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(hmacHasher, stringToBytes(INITIAL_HASH_STRING));
+  updateBlake2s(chainHasher, stringToBytes(INITIAL_HASH_STRING));
+  chainHash.set(sumBlake2s(chainHasher));
   chainKey.set(mixKey(chainHash, stringToBytes(INITIAL_CHAIN_KEY_STRING)));
 
   // Mix in remote public key
-  updateSHA256(hmacHasher, remotePubKeyBytes);
-  updateSHA256(chainHasher, remotePubKeyBytes);
+  updateBlake2s(hmacHasher, remotePubKeyBytes);
+  updateBlake2s(chainHasher, remotePubKeyBytes);
 
   // Generate ephemeral key pair and perform ECDH
-  const ephemeralKeys = await generateX25519KeyPair();
-  const ephemeralPublicKeyBytes = await x25519PublicKeyToBytes(ephemeralKeys.publicKey);
+  const ephemeralKeys = generateX25519KeyPairRaw();
+  const ephemeralPublicKeyBytes = ephemeralKeys.publicKey;
   header.ephemeral = ephemeralPublicKeyBytes;
 
-  updateSHA256(chainHasher, ephemeralPublicKeyBytes);
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(chainHasher, ephemeralPublicKeyBytes);
+  chainHash.set(sumBlake2s(chainHasher));
   chainKey.set(mixKey(chainKey, ephemeralPublicKeyBytes));
 
   // ECDH: ephemeral private * remote public
-  const essKey = await ecdhX25519(ephemeralKeys.privateKey, remotePubKey);
-  const ess = await x25519PublicKeyToBytes(essKey);
+  const ess = ecdhX25519Raw(ephemeralKeys.privateKey, remotePubKeyBytes);
 
   // Encrypt local public key
   const derivedKeys0 = keyGen2(chainKey, ess);
   chainKey.set(derivedKeys0.first);
 
-  const keyStatic = chacha20Seal(derivedKeys0.second, nonce, localPubKeyBytes, chainHash);
+  const keyStatic = aesGcmSeal(derivedKeys0.second, nonce, localPubKeyBytes, chainHash);
   header.static = keyStatic;
 
-  updateSHA256(chainHasher, keyStatic);
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(chainHasher, keyStatic);
+  chainHash.set(sumBlake2s(chainHasher));
 
   // ECDH: local private * remote public
-  const ssKey = await ecdhX25519(localPrivKey, remotePubKey);
-  const ss = await x25519PublicKeyToBytes(ssKey);
+  const ss = ecdhX25519Raw(localPrivKeyBytes, remotePubKeyBytes);
 
   // Encrypt timestamp
   const derivedKeys1 = keyGen2(chainKey, ss);
@@ -143,21 +136,21 @@ export async function buildNHPPacket(
   const ts = new Uint8Array(tsBuf);
   lastSendTimeMap.set(remotePublicKey, timestamp);
 
-  const tsStatic = chacha20Seal(derivedKeys1.second, nonce, ts, chainHash);
+  const tsStatic = aesGcmSeal(derivedKeys1.second, nonce, ts, chainHash);
   header.timestamp = tsStatic;
 
   // Encrypt message payload
   const derivedKeys2 = keyGen2(chainKey, tsStatic);
   chainKey.set(derivedKeys2.first);
-  updateSHA256(chainHasher, tsStatic);
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(chainHasher, tsStatic);
+  chainHash.set(sumBlake2s(chainHasher));
 
   let payload = msgBytes;
   if (compress) {
     payload = await zlibCompress(msgBytes);
   }
 
-  const msgStatic = chacha20Seal(derivedKeys2.second, nonce, payload, chainHash);
+  const msgStatic = aesGcmSeal(derivedKeys2.second, nonce, payload, chainHash);
   packet.set(msgStatic, header.size);
 
   const payloadSize = payload.byteLength + FIELD_SIZES.AEAD_TAG;
@@ -167,11 +160,11 @@ export async function buildNHPPacket(
   if (type === NHP_PACKET_TYPES.RNK) {
     const cookie = serverCookieMap.get(remotePublicKey);
     if (cookie) {
-      updateSHA256(hmacHasher, cookie);
+      updateBlake2s(hmacHasher, cookie);
     }
   }
-  updateSHA256(hmacHasher, packet.subarray(0, header.size - FIELD_SIZES.HMAC));
-  header.hmac = sumSHA256(hmacHasher);
+  updateBlake2s(hmacHasher, packet.subarray(0, header.size - FIELD_SIZES.HMAC));
+  header.hmac = sumBlake2s(hmacHasher);
 
   return packet.subarray(0, header.size + payloadSize);
 }
@@ -216,24 +209,23 @@ export async function parseNHPPacket(
 
   const recvTime = getUnixNano();
 
-  // Verify HMAC
+  // Convert keys from base64 to raw bytes
+  const localPrivKeyBytes = base64ToBytes(privateKey);
   const localPubKeyBytes = base64ToBytes(publicKey);
-  const hmacHasher = newSHA256Hash();
-  updateSHA256(hmacHasher, stringToBytes(INITIAL_HASH_STRING));
-  updateSHA256(hmacHasher, localPubKeyBytes);
-  updateSHA256(hmacHasher, packet.subarray(0, header.size - FIELD_SIZES.HMAC));
-  const checkSum = sumSHA256(hmacHasher);
+  const remotePubKeyBytes = base64ToBytes(remotePublicKey);
+
+  // Verify HMAC
+  const hmacHasher = newBlake2sHash();
+  updateBlake2s(hmacHasher, stringToBytes(INITIAL_HASH_STRING));
+  updateBlake2s(hmacHasher, localPubKeyBytes);
+  updateBlake2s(hmacHasher, packet.subarray(0, header.size - FIELD_SIZES.HMAC));
+  const checkSum = sumBlake2s(hmacHasher);
 
   if (!equalBytes(checkSum, header.hmac)) {
     throw new Error('HMAC check failed');
   }
 
-  const localPrivKey = await base64ToX25519PrivateKey(privateKey);
-  const remotePubKey = await base64ToX25519PublicKey(remotePublicKey);
-  const remotePubKeyBytes = base64ToBytes(remotePublicKey);
-
   const ephemeralPublicKeyBytes = header.ephemeral;
-  const ephemeralPublicKey = await bytesToX25519PublicKey(ephemeralPublicKeyBytes);
   const nonce = header.nonce;
   const keyStatic = header.static;
   const tsStatic = header.timestamp;
@@ -242,42 +234,40 @@ export async function parseNHPPacket(
   // Initialize chain key and hash
   const chainKey = new Uint8Array(32);
   const chainHash = new Uint8Array(32);
-  const chainHasher = newSHA256Hash();
+  const chainHasher = newBlake2sHash();
 
-  updateSHA256(chainHasher, stringToBytes(INITIAL_HASH_STRING));
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(chainHasher, stringToBytes(INITIAL_HASH_STRING));
+  chainHash.set(sumBlake2s(chainHasher));
   chainKey.set(mixKey(chainHash, stringToBytes(INITIAL_CHAIN_KEY_STRING)));
 
-  updateSHA256(chainHasher, localPubKeyBytes);
-  updateSHA256(chainHasher, ephemeralPublicKeyBytes);
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(chainHasher, localPubKeyBytes);
+  updateBlake2s(chainHasher, ephemeralPublicKeyBytes);
+  chainHash.set(sumBlake2s(chainHasher));
   chainKey.set(mixKey(chainKey, ephemeralPublicKeyBytes));
 
   // ECDH: local private * ephemeral public
-  const essKey = await ecdhX25519(localPrivKey, ephemeralPublicKey);
-  const ess = await x25519PublicKeyToBytes(essKey);
+  const ess = ecdhX25519Raw(localPrivKeyBytes, ephemeralPublicKeyBytes);
 
   // Decrypt remote public key
   const derivedKeys0 = keyGen2(chainKey, ess);
   chainKey.set(derivedKeys0.first);
-  const decryptedPubKeyBytes = chacha20Open(derivedKeys0.second, nonce, keyStatic, chainHash);
+  const decryptedPubKeyBytes = aesGcmOpen(derivedKeys0.second, nonce, keyStatic, chainHash);
 
   if (!equalBytes(remotePubKeyBytes, decryptedPubKeyBytes)) {
     throw new Error('Remote public key check failed');
   }
 
-  updateSHA256(chainHasher, keyStatic);
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(chainHasher, keyStatic);
+  chainHash.set(sumBlake2s(chainHasher));
 
   // ECDH: local private * remote public
-  const ssKey = await ecdhX25519(localPrivKey, remotePubKey);
-  const ss = await x25519PublicKeyToBytes(ssKey);
+  const ss = ecdhX25519Raw(localPrivKeyBytes, remotePubKeyBytes);
 
   // Decrypt timestamp
   const derivedKeys1 = keyGen2(chainKey, ss);
   chainKey.set(derivedKeys1.first);
 
-  const decryptedTs = chacha20Open(derivedKeys1.second, nonce, tsStatic, chainHash);
+  const decryptedTs = aesGcmOpen(derivedKeys1.second, nonce, tsStatic, chainHash);
   // Create a new ArrayBuffer to avoid SharedArrayBuffer issues
   const tsBuf = new ArrayBuffer(decryptedTs.length);
   new Uint8Array(tsBuf).set(decryptedTs);
@@ -304,10 +294,10 @@ export async function parseNHPPacket(
   // Decrypt message
   const derivedKeys2 = keyGen2(chainKey, header.timestamp);
   chainKey.set(derivedKeys2.first);
-  updateSHA256(chainHasher, tsStatic);
-  chainHash.set(sumSHA256(chainHasher));
+  updateBlake2s(chainHasher, tsStatic);
+  chainHash.set(sumBlake2s(chainHasher));
 
-  let msg = chacha20Open(derivedKeys2.second, nonce, msgStatic, chainHash);
+  let msg = aesGcmOpen(derivedKeys2.second, nonce, msgStatic, chainHash);
 
   if (compressed) {
     msg = await zlibDecompress(msg);

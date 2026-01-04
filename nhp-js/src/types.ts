@@ -48,10 +48,16 @@ export interface ResourceConfig {
 export interface KnockResult {
   /** Whether the knock was successful */
   success: boolean;
-  /** Access token received on success */
+  /** Access token received on success (ASP token) */
   accessToken?: string;
   /** Expiration timestamp of the access (Unix milliseconds) */
   expiresAt?: number;
+  /** Resource host mapping (service -> host:port) */
+  resourceHosts?: Record<string, string>;
+  /** Agent's address as seen by server */
+  agentAddress?: string;
+  /** Pre-access URL (for captive portal etc) */
+  preAccessUrl?: string;
   /** Error message if knock failed */
   error?: string;
   /** Error code if knock failed */
@@ -137,4 +143,56 @@ export interface TransportMessage {
   remoteAddress?: string;
   /** Source port (if applicable) */
   remotePort?: number;
+}
+
+/**
+ * Agent Knock Message - matches Go AgentKnockMsg
+ * Sent by agent to request access to a resource
+ */
+export interface AgentKnockMsg {
+  /** User ID */
+  usrId: string;
+  /** Device ID */
+  devId: string;
+  /** Organization ID (optional) */
+  orgId?: string;
+  /** Auth Service Provider ID */
+  aspId: string;
+  /** Resource ID */
+  resId: string;
+  /** Check mode (optional, for validation only) */
+  cknMode?: number;
+}
+
+/**
+ * Server Knock Acknowledge Message - matches Go ServerKnockAckMsg
+ * Sent by server in response to a knock
+ */
+export interface ServerKnockAckMsg {
+  /** Error code (empty string means success) */
+  errCode: string;
+  /** Error message (if errCode is not empty) */
+  errMsg?: string;
+  /** Resource host map (service -> host:port) */
+  resHost: Record<string, string>;
+  /** Open/access time in seconds */
+  opnTime: number;
+  /** Auth Service Provider token (if ASP mode) */
+  aspToken?: string;
+  /** Agent's address as seen by server */
+  agentAddr: string;
+  /** Pre-access URL (for captive portal etc) */
+  preAccUrl?: string;
+}
+
+/**
+ * Agent configuration for knock requests
+ */
+export interface AgentIdentity {
+  /** User ID */
+  userId: string;
+  /** Device ID (generated or provided) */
+  deviceId: string;
+  /** Organization ID (optional) */
+  organizationId?: string;
 }

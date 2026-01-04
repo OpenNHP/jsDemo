@@ -12,9 +12,13 @@ import type {
   EventHandler,
   KeyPairBase64,
   LogLevel,
+  AgentKnockMsg,
+  ServerKnockAckMsg,
+  AgentIdentity,
+  ParsedPacket,
 } from './types.js';
-import { generateX25519KeyPairBase64 } from './crypto/ecdh.js';
-import { base64ToBytes } from './crypto/utils.js';
+import { generateX25519KeyPairBase64, derivePublicKeyFromBase64 } from './crypto/ecdh.js';
+import { randomBytes, bytesToHex } from './crypto/utils.js';
 import { buildNHPPacket, parseNHPPacket, clearServerCookie } from './protocol/packet.js';
 import { NHP_PACKET_TYPES } from './protocol/constants.js';
 import { WebSocketTransport } from './transport/websocket.js';
@@ -36,7 +40,11 @@ const DEFAULT_CONFIG: Required<Omit<NHPAgentConfig, 'privateKey'>> = {
  * });
  *
  * await agent.init();
- * agent.setUser('user123', 'opennhp.org');
+ * agent.setIdentity({
+ *   userId: 'user123',
+ *   deviceId: 'device456',
+ *   organizationId: 'opennhp.org'
+ * });
  * agent.addServer({
  *   publicKey: 'abc123...',
  *   host: 'nhp.example.com',
@@ -52,6 +60,7 @@ const DEFAULT_CONFIG: Required<Omit<NHPAgentConfig, 'privateKey'>> = {
  *
  * if (result.success) {
  *   console.log('Access granted until:', result.expiresAt);
+ *   console.log('Resource hosts:', result.resourceHosts);
  * }
  *
  * await agent.close();
@@ -60,8 +69,7 @@ const DEFAULT_CONFIG: Required<Omit<NHPAgentConfig, 'privateKey'>> = {
 export class NHPAgent {
   private config: Required<Omit<NHPAgentConfig, 'privateKey'>> & { privateKey?: string };
   private keyPair: KeyPairBase64 | null = null;
-  private userId: string | null = null;
-  private organizationId: string | null = null;
+  private identity: AgentIdentity | null = null;
   private servers: Map<string, ServerConfig> = new Map();
   private transports: Map<string, WebSocketTransport> = new Map();
   private eventHandlers: Map<NHPAgentEvent, Set<EventHandler>> = new Map();
@@ -89,15 +97,15 @@ export class NHPAgent {
 
     if (this.config.privateKey) {
       // Derive public key from provided private key
-      const privateKeyBytes = base64ToBytes(this.config.privateKey);
-      if (privateKeyBytes.length !== 32) {
-        throw new Error('Invalid private key length');
-      }
-      // For now, we require both keys to be provided
-      throw new Error('Public key derivation not implemented. Please provide both keys.');
+      const publicKey = derivePublicKeyFromBase64(this.config.privateKey);
+      this.keyPair = {
+        privateKey: this.config.privateKey,
+        publicKey,
+      };
+      this.log('info', 'Using provided private key');
     } else {
       // Generate new key pair
-      this.keyPair = await generateX25519KeyPairBase64();
+      this.keyPair = generateX25519KeyPairBase64();
       this.log('info', 'Generated new X25519 key pair');
     }
 
@@ -126,12 +134,25 @@ export class NHPAgent {
   }
 
   /**
-   * Set the user identity for knock requests
+   * Set the agent identity for knock requests
+   */
+  setIdentity(identity: AgentIdentity): void {
+    this.identity = identity;
+    this.log('debug', `Identity set: userId=${identity.userId}, deviceId=${identity.deviceId}`);
+  }
+
+  /**
+   * Set the user identity for knock requests (legacy method)
+   * @deprecated Use setIdentity instead
    */
   setUser(userId: string, organizationId?: string): void {
-    this.userId = userId;
-    this.organizationId = organizationId ?? null;
-    this.log('debug', `User set: ${userId}${organizationId ? ` (${organizationId})` : ''}`);
+    // Generate a device ID if not using setIdentity
+    const deviceId = bytesToHex(randomBytes(16));
+    this.setIdentity({
+      userId,
+      deviceId,
+      organizationId,
+    });
   }
 
   /**
@@ -184,10 +205,10 @@ export class NHPAgent {
       };
     }
 
-    if (!this.userId) {
+    if (!this.identity) {
       return {
         success: false,
-        error: 'User not set',
+        error: 'Identity not set. Call setIdentity() first.',
         errorCode: 2,
       };
     }
@@ -204,56 +225,32 @@ export class NHPAgent {
     }
 
     try {
-      // Build knock message
-      const knockMessage = JSON.stringify({
-        userId: this.userId,
-        organizationId: this.organizationId,
-        resourceId: resource.resourceId,
-        serviceId: resource.serviceId,
-        timestamp: Date.now(),
-      });
+      // Build knock message matching Go AgentKnockMsg structure
+      const knockMsg: AgentKnockMsg = {
+        usrId: this.identity.userId,
+        devId: this.identity.deviceId,
+        orgId: this.identity.organizationId,
+        aspId: resource.serviceId, // ASP ID maps to service ID
+        resId: resource.resourceId,
+      };
 
-      // Build knock packet
-      const packet = await buildNHPPacket(
-        NHP_PACKET_TYPES.KNK,
-        this.keyPair.privateKey,
-        this.keyPair.publicKey,
-        server.publicKey,
-        knockMessage,
-        true // compress
-      );
+      // First attempt with KNK packet type
+      let result = await this.sendKnock(NHP_PACKET_TYPES.KNK, knockMsg, server, resource);
 
-      this.log('debug', `Knock packet built: ${packet.length} bytes`);
-      this.emit('knock', { resource, packet });
-
-      // Get or create transport
-      let transport = this.transports.get(serverId);
-      if (!transport) {
-        const wsUrl = `wss://${resource.serverHost}:${resource.serverPort}/nhp`;
-        transport = new WebSocketTransport({
-          url: wsUrl,
-          autoReconnect: false,
-        });
-        this.transports.set(serverId, transport);
+      // If server returned cookie (overloaded), resend with RNK
+      if (result.type === NHP_PACKET_TYPES.COK) {
+        this.log('info', 'Server overloaded, resending with cookie');
+        result = await this.sendKnock(NHP_PACKET_TYPES.RNK, knockMsg, server, resource);
       }
 
-      // Send packet and wait for response
-      const response = await this.sendAndWaitForResponse(transport, packet, server.publicKey);
-
-      if (response) {
-        this.log('info', 'Knock successful');
-        this.emit('ack', response);
-
-        return {
-          success: true,
-          accessToken: response.accessToken,
-          expiresAt: response.expiresAt,
-        };
+      // Process ACK response
+      if (result.type === NHP_PACKET_TYPES.ACK) {
+        return this.parseAckResponse(result.message);
       }
 
       return {
         success: false,
-        error: 'No response received',
+        error: `Unexpected response type: ${result.type}`,
         errorCode: 4,
       };
     } catch (err) {
@@ -309,15 +306,91 @@ export class NHPAgent {
     }
   }
 
+  private async sendKnock(
+    packetType: number,
+    knockMsg: AgentKnockMsg,
+    server: ServerConfig,
+    resource: ResourceConfig
+  ): Promise<ParsedPacket> {
+    if (!this.keyPair) {
+      throw new Error('Agent not initialized');
+    }
+
+    const knockMessage = JSON.stringify(knockMsg);
+
+    // Build knock packet
+    const packet = await buildNHPPacket(
+      packetType,
+      this.keyPair.privateKey,
+      this.keyPair.publicKey,
+      server.publicKey,
+      knockMessage,
+      true // compress
+    );
+
+    this.log('debug', `${packetType === NHP_PACKET_TYPES.KNK ? 'KNK' : 'RNK'} packet built: ${packet.length} bytes`);
+    this.emit('knock', { resource, packetType, packet });
+
+    // Get or create transport
+    const serverId = `${resource.serverHost}:${resource.serverPort}`;
+    let transport = this.transports.get(serverId);
+    if (!transport) {
+      // Note: This uses WebSocket which Go server doesn't support.
+      // Should be replaced with UDP or WebRTC transport.
+      const wsUrl = `wss://${resource.serverHost}:${resource.serverPort}/nhp`;
+      transport = new WebSocketTransport({
+        url: wsUrl,
+        autoReconnect: false,
+      });
+      this.transports.set(serverId, transport);
+    }
+
+    // Send packet and wait for response
+    return this.sendAndWaitForResponse(transport, packet, server.publicKey);
+  }
+
+  private parseAckResponse(message: string): KnockResult {
+    try {
+      const ackMsg: ServerKnockAckMsg = JSON.parse(message);
+
+      // Check for error
+      if (ackMsg.errCode && ackMsg.errCode !== '') {
+        return {
+          success: false,
+          error: ackMsg.errMsg || `Server error: ${ackMsg.errCode}`,
+          errorCode: parseInt(ackMsg.errCode) || 6,
+        };
+      }
+
+      this.log('info', 'Knock successful');
+      this.emit('ack', ackMsg);
+
+      return {
+        success: true,
+        expiresAt: Date.now() + ackMsg.opnTime * 1000,
+        accessToken: ackMsg.aspToken,
+        resourceHosts: ackMsg.resHost,
+        agentAddress: ackMsg.agentAddr,
+        preAccessUrl: ackMsg.preAccUrl,
+      };
+    } catch {
+      return {
+        success: false,
+        error: 'Failed to parse server response',
+        errorCode: 7,
+      };
+    }
+  }
+
   private async sendAndWaitForResponse(
     transport: WebSocketTransport,
     packet: Uint8Array,
     serverPublicKey: string
-  ): Promise<{ accessToken?: string; expiresAt?: number } | null> {
+  ): Promise<ParsedPacket> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         transport.off('message', messageHandler);
-        resolve(null);
+        reject(new Error('Request timeout'));
       }, 10000); // 10 second timeout
 
       const messageHandler = async (msg: unknown) => {
@@ -337,16 +410,7 @@ export class NHPAgent {
             serverPublicKey
           );
 
-          // Parse response message
-          try {
-            const responseData = JSON.parse(parsed.message);
-            resolve({
-              accessToken: responseData.accessToken,
-              expiresAt: responseData.expiresAt,
-            });
-          } catch {
-            resolve({});
-          }
+          resolve(parsed);
         } catch (err) {
           reject(err);
         }
