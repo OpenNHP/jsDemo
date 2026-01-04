@@ -9,6 +9,13 @@ export default defineConfig({
       rollupTypes: true,
     }),
   ],
+  test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov', 'html'],
+      exclude: ['node_modules/', 'dist/', 'test/', '*.config.*'],
+    },
+  },
   build: {
     lib: {
       entry: resolve(__dirname, 'src/index.ts'),
