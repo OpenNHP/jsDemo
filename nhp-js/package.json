@@ -1,20 +1,52 @@
 {
-  "name": "nhp-js",
-  "private": true,
-  "version": "0.0.0",
+  "name": "@opennhp/agent",
+  "version": "1.0.0",
+  "description": "OpenNHP JavaScript/TypeScript SDK for zero-trust network security",
   "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "vite build && tsc --emitDeclarationOnly",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "prepublishOnly": "npm run build"
   },
-  "devDependencies": {
-    "vite": "^7.2.4"
+  "keywords": [
+    "nhp",
+    "opennhp",
+    "zero-trust",
+    "network-security",
+    "cryptography"
+  ],
+  "author": "OpenNHP",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OpenNHP/js-agent.git"
   },
   "dependencies": {
     "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2.0.1",
-    "crypto-js": "^4.2.0",
-    "gm-crypto": "^0.1.12"
+    "@noble/hashes": "^1.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "typescript": "^5.8.0",
+    "vite": "^7.2.4",
+    "vite-plugin-dts": "^4.5.4",
+    "vitest": "^3.2.0"
   }
 }
