@@ -16,7 +16,6 @@ import type {
   ServerKnockAckMsg,
   AgentIdentity,
   ParsedPacket,
-  TransportType,
 } from './types.js';
 import { generateX25519KeyPairBase64, derivePublicKeyFromBase64 } from './crypto/ecdh.js';
 import { generateSM2KeyPairBase64, deriveSM2PublicKeyFromBase64 } from './crypto/sm2.js';

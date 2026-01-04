@@ -6,7 +6,7 @@
  */
 
 import { sm3 as sm3Hash } from 'sm-crypto-v2';
-import { bytesToHex, hexToBytes, concatBytes } from './utils.js';
+import { hexToBytes, concatBytes } from './utils.js';
 
 /** SM3 hash output size in bytes */
 export const SM3_HASH_SIZE = 32;
