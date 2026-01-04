@@ -5,7 +5,7 @@
  */
 
 import type { PacketType, ParsedPacket, CipherScheme } from '../types.js';
-import { NHPHeader, NHPHeaderEx, type INHPHeader } from './header.js';
+import { NHPHeader, NHPHeaderEx } from './header.js';
 import {
   PACKET_BUFFER_SIZE,
   HEADER_SIZE,
@@ -33,7 +33,6 @@ import {
 import {
   generateSM2KeyPair,
   sm2ECDH,
-  SM2_PUBLIC_KEY_SIZE,
 } from '../crypto/sm2.js';
 import {
   sm3,
