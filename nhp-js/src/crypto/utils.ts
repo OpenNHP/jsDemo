@@ -1,11 +1,27 @@
 /**
  * Utility functions for cryptographic operations
+ * Works in both browser and Node.js environments
  */
+
+// Type declarations for Node.js compatibility
+declare const Buffer: {
+  from(data: string, encoding?: string): { toString(encoding?: string): string };
+};
+declare const process: { versions?: { node?: string } };
+
+// Detect Node.js environment
+const isNode = typeof process !== 'undefined' && process.versions?.node;
 
 /**
  * Convert Uint8Array to Base64 string
+ * Works in both browser and Node.js
  */
 export function bytesToBase64(bytes: Uint8Array): string {
+  if (isNode && typeof Buffer !== 'undefined') {
+    // Node.js path
+    return Buffer.from(bytes as unknown as string, 'binary').toString('base64');
+  }
+  // Browser path
   let binary = '';
   for (let i = 0; i < bytes.length; i++) {
     binary += String.fromCharCode(bytes[i]);
@@ -15,8 +31,20 @@ export function bytesToBase64(bytes: Uint8Array): string {
 
 /**
  * Convert Base64 string to Uint8Array
+ * Works in both browser and Node.js
  */
 export function base64ToBytes(base64: string): Uint8Array {
+  if (isNode && typeof Buffer !== 'undefined') {
+    // Node.js path
+    const buf = Buffer.from(base64, 'base64');
+    const bytes = new Uint8Array(buf.toString('binary').length);
+    const binary = buf.toString('binary');
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+  // Browser path
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
@@ -57,40 +85,65 @@ export function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
  */
 export function getUnixNano(): bigint {
   const ms = Date.now();
-  const subMs = performance.now() % 1;
+  // Use performance.now() for sub-millisecond precision if available
+  const subMs = typeof performance !== 'undefined' ? performance.now() % 1 : 0;
   return BigInt(ms) * 1_000_000n + BigInt(Math.floor(subMs * 1_000_000));
 }
 
 /**
  * Compress data using zlib deflate
+ * Works in both browser (CompressionStream) and Node.js (zlib)
  */
 export async function zlibCompress(data: Uint8Array): Promise<Uint8Array> {
-  const cs = new CompressionStream('deflate');
-  const writer = cs.writable.getWriter();
-  // Copy to a new ArrayBuffer to avoid SharedArrayBuffer issues
-  const buffer = new Uint8Array(data).buffer;
-  await writer.write(buffer);
-  await writer.close();
+  if (typeof CompressionStream !== 'undefined') {
+    // Browser path using Compression Streams API
+    const cs = new CompressionStream('deflate');
+    const writer = cs.writable.getWriter();
+    // Copy to a new ArrayBuffer to avoid SharedArrayBuffer issues
+    const buffer = new Uint8Array(data).buffer;
+    await writer.write(buffer);
+    await writer.close();
 
-  const response = new Response(cs.readable);
-  const compressedBuffer = await response.arrayBuffer();
-  return new Uint8Array(compressedBuffer);
+    const response = new Response(cs.readable);
+    const compressedBuffer = await response.arrayBuffer();
+    return new Uint8Array(compressedBuffer);
+  }
+
+  // Node.js path using dynamic import
+  if (isNode) {
+    const { deflateSync } = await import('zlib');
+    return new Uint8Array(deflateSync(data));
+  }
+
+  throw new Error('Compression not supported in this environment');
 }
 
 /**
  * Decompress data using zlib inflate
+ * Works in both browser (DecompressionStream) and Node.js (zlib)
  */
 export async function zlibDecompress(compressedData: Uint8Array): Promise<Uint8Array> {
-  const ds = new DecompressionStream('deflate');
-  const writer = ds.writable.getWriter();
-  // Copy to a new ArrayBuffer to avoid SharedArrayBuffer issues
-  const buffer = new Uint8Array(compressedData).buffer;
-  await writer.write(buffer);
-  await writer.close();
+  if (typeof DecompressionStream !== 'undefined') {
+    // Browser path using Compression Streams API
+    const ds = new DecompressionStream('deflate');
+    const writer = ds.writable.getWriter();
+    // Copy to a new ArrayBuffer to avoid SharedArrayBuffer issues
+    const buffer = new Uint8Array(compressedData).buffer;
+    await writer.write(buffer);
+    await writer.close();
 
-  const response = new Response(ds.readable);
-  const arrayBuffer = await response.arrayBuffer();
-  return new Uint8Array(arrayBuffer);
+    const response = new Response(ds.readable);
+    const arrayBuffer = await response.arrayBuffer();
+    return new Uint8Array(arrayBuffer);
+  }
+
+  // Node.js path using dynamic import
+  if (isNode) {
+    const { inflateSync } = await import('zlib');
+    return new Uint8Array(inflateSync(compressedData));
+  }
+
+  throw new Error('Decompression not supported in this environment');
 }
 
 /**
@@ -98,7 +151,15 @@ export async function zlibDecompress(compressedData: Uint8Array): Promise<Uint8A
  */
 export function randomBytes(length: number): Uint8Array {
   const bytes = new Uint8Array(length);
-  crypto.getRandomValues(bytes);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else if (isNode) {
+    // Fallback for older Node.js versions
+    const { randomFillSync } = require('crypto');
+    randomFillSync(bytes);
+  } else {
+    throw new Error('No secure random source available');
+  }
   return bytes;
 }
 
@@ -114,4 +175,24 @@ export function concatBytes(...arrays: Uint8Array[]): Uint8Array {
     offset += arr.length;
   }
   return result;
+}
+
+/**
+ * Convert Uint8Array to hex string
+ */
+export function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
+ * Convert hex string to Uint8Array
+ */
+export function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+  }
+  return bytes;
 }

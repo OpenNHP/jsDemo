@@ -1,13 +1,64 @@
 /**
  * ECDH key exchange using X25519
- * Uses Web Crypto API for cryptographic operations
+ * Uses @noble/curves for raw byte operations (NHP protocol)
+ * Also supports Web Crypto API for backwards compatibility
  */
 
+import { x25519 } from '@noble/curves/ed25519.js';
 import type { KeyPair, KeyPairBase64 } from '../types.js';
 import { bytesToBase64, base64ToBytes } from './utils.js';
 
 /**
- * Generate a new X25519 key pair
+ * Generate a new X25519 key pair as raw bytes
+ */
+export function generateX25519KeyPairRaw(): { privateKey: Uint8Array; publicKey: Uint8Array } {
+  const privateKey = x25519.utils.randomSecretKey();
+  const publicKey = x25519.getPublicKey(privateKey);
+  return { privateKey, publicKey };
+}
+
+/**
+ * Generate a new X25519 key pair and return as Base64 strings
+ */
+export function generateX25519KeyPairBase64(): KeyPairBase64 {
+  const { privateKey, publicKey } = generateX25519KeyPairRaw();
+  return {
+    privateKey: bytesToBase64(privateKey),
+    publicKey: bytesToBase64(publicKey),
+  };
+}
+
+/**
+ * Perform ECDH key exchange using X25519
+ * Returns the raw 32-byte shared secret
+ */
+export function ecdhX25519Raw(privateKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
+  return x25519.getSharedSecret(privateKey, publicKey);
+}
+
+/**
+ * Derive public key from private key
+ */
+export function derivePublicKey(privateKey: Uint8Array): Uint8Array {
+  return x25519.getPublicKey(privateKey);
+}
+
+/**
+ * Derive public key from base64-encoded private key
+ */
+export function derivePublicKeyFromBase64(privateKeyBase64: string): string {
+  const privateKey = base64ToBytes(privateKeyBase64);
+  const publicKey = derivePublicKey(privateKey);
+  return bytesToBase64(publicKey);
+}
+
+// ============================================================================
+// Web Crypto API functions (for backwards compatibility)
+// These are kept for existing code that uses CryptoKey objects
+// ============================================================================
+
+/**
+ * Generate a new X25519 key pair using Web Crypto
  */
 export async function generateX25519KeyPair(): Promise<KeyPair> {
   const keyPair = await crypto.subtle.generateKey(
@@ -19,22 +70,8 @@ export async function generateX25519KeyPair(): Promise<KeyPair> {
 }
 
 /**
- * Generate a new X25519 key pair and return as Base64 strings
- */
-export async function generateX25519KeyPairBase64(): Promise<KeyPairBase64> {
-  const keyPair = await generateX25519KeyPair();
-  const privateKeyBytes = await x25519PrivateKeyToBytes(keyPair.privateKey);
-  const publicKeyBytes = await x25519PublicKeyToBytes(keyPair.publicKey);
-
-  return {
-    privateKey: bytesToBase64(privateKeyBytes),
-    publicKey: bytesToBase64(publicKeyBytes),
-  };
-}
-
-/**
- * Perform ECDH key exchange using X25519
- * Returns the shared secret as a CryptoKey
+ * Perform ECDH key exchange using Web Crypto
+ * Returns a CryptoKey (for legacy code)
  */
 export async function ecdhX25519(
   privateKey: CryptoKey,
@@ -126,7 +163,9 @@ export async function base64ToX25519PrivateKey(b64: string): Promise<CryptoKey> 
   return await bytesToX25519PrivateKey(bytes);
 }
 
-// ASN.1/DER helper functions
+// ============================================================================
+// ASN.1/DER helper functions for PKCS#8 format
+// ============================================================================
 
 function decodeASN1Length(bytes: Uint8Array, offset: number): { length: number; nextOffset: number } {
   let len = bytes[offset++];
