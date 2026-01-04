@@ -1,0 +1,15 @@
+# Source and config
+src/
+test/
+*.config.ts
+*.config.js
+tsconfig.json
+typedoc.json
+
+# Development
+.github/
+examples/
+docs/
+
+# Build artifacts not needed
+*.map
