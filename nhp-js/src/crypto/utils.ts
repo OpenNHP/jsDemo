@@ -155,6 +155,7 @@ export function randomBytes(length: number): Uint8Array {
     crypto.getRandomValues(bytes);
   } else if (isNode) {
     // Fallback for older Node.js versions
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { randomFillSync } = require('crypto');
     randomFillSync(bytes);
   } else {

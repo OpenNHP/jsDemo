@@ -11,7 +11,7 @@ import {
   derivePublicKey,
   derivePublicKeyFromBase64,
 } from '../../src/crypto/ecdh.js';
-import { base64ToBytes, bytesToBase64, bytesToHex } from '../../src/crypto/utils.js';
+import { base64ToBytes, bytesToHex } from '../../src/crypto/utils.js';
 
 describe('X25519 Key Generation', () => {
   it('generateX25519KeyPairRaw should produce valid key pair', () => {

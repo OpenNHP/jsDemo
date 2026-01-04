@@ -5,7 +5,6 @@
  */
 
 import { gcm } from '@noble/ciphers/aes.js';
-import { FIELD_SIZES } from '../protocol/constants.js';
 
 /**
  * Encrypt data using AES-256-GCM AEAD
