@@ -406,15 +406,24 @@ export class NHPAgent {
 
       case 'webrtc':
         this.log('debug', `Creating WebRTC transport to ${host}:${port}`);
-        // WebRTC requires signaling - use HTTP signaling endpoint
+        // WebRTC requires signaling - prefer WebSocket for trickle ICE support
+        // Handle host that may already include protocol prefix
+        const wsHostRtc = host.replace(/^https?:\/\//, '');
+        // Determine if we should use secure WebSocket based on original URL
+        const isSecure = host.startsWith('https://') || !host.startsWith('http://');
+        const wsProtocol = isSecure ? 'wss' : 'ws';
+        const httpProtocol = isSecure ? 'https' : 'http';
         return new WebRTCTransport({
-          signalingUrl: `https://${host}:${port}/webrtc/signal`,
+          wsSignalingUrl: `${wsProtocol}://${wsHostRtc}:${port}/webrtc/signaling`,
+          signalingUrl: `${httpProtocol}://${wsHostRtc}:${port}/webrtc/signaling`, // fallback
         }) as Transport;
 
       case 'websocket':
         this.log('debug', `Creating WebSocket transport to ${host}:${port}`);
+        // Handle host that may already include protocol prefix
+        const wsHost = host.replace(/^https?:\/\//, '');
         return new WebSocketTransport({
-          url: `wss://${host}:${port}/nhp`,
+          url: `wss://${wsHost}:${port}/nhp`,
           autoReconnect: false,
         }) as Transport;
 

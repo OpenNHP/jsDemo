@@ -98,14 +98,15 @@ export async function zlibCompress(data: Uint8Array): Promise<Uint8Array> {
   if (typeof CompressionStream !== 'undefined') {
     // Browser path using Compression Streams API
     const cs = new CompressionStream('deflate');
+    // Start reading immediately (consumer)
+    const readPromise = new Response(cs.readable).arrayBuffer();
     const writer = cs.writable.getWriter();
     // Copy to a new ArrayBuffer to avoid SharedArrayBuffer issues
-    const buffer = new Uint8Array(data).buffer;
+    const buffer = data.slice(); // copies only byteLength bytes
     await writer.write(buffer);
     await writer.close();
 
-    const response = new Response(cs.readable);
-    const compressedBuffer = await response.arrayBuffer();
+    const compressedBuffer = await readPromise;
     return new Uint8Array(compressedBuffer);
   }
 
@@ -126,14 +127,15 @@ export async function zlibDecompress(compressedData: Uint8Array): Promise<Uint8A
   if (typeof DecompressionStream !== 'undefined') {
     // Browser path using Compression Streams API
     const ds = new DecompressionStream('deflate');
+    // Start reading immediately (consumer)
+    const readPromise = new Response(ds.readable).arrayBuffer();
     const writer = ds.writable.getWriter();
     // Copy to a new ArrayBuffer to avoid SharedArrayBuffer issues
-    const buffer = new Uint8Array(compressedData).buffer;
+    const buffer = compressedData.slice();
     await writer.write(buffer);
     await writer.close();
 
-    const response = new Response(ds.readable);
-    const arrayBuffer = await response.arrayBuffer();
+    const arrayBuffer = await readPromise;
     return new Uint8Array(arrayBuffer);
   }
 

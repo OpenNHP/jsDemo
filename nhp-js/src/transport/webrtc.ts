@@ -4,6 +4,10 @@
  *
  * The Go NHP server supports WebRTC DataChannel for browser clients.
  * This transport handles the WebRTC signaling and data channel setup.
+ * 
+ * Supports two signaling modes:
+ * 1. HTTP POST signaling (legacy) - single request/response for offer/answer
+ * 2. WebSocket signaling (preferred) - supports trickle ICE for faster connection
  */
 
 import type {
@@ -19,14 +23,24 @@ export interface WebRTCTransportConfig {
   stunServers?: string[];
   /** TURN server URLs for ICE connectivity (with credentials) */
   turnServers?: RTCIceServer[];
-  /** Signaling server URL for offer/answer exchange */
+  /** HTTP signaling server URL for offer/answer exchange (legacy) */
   signalingUrl?: string;
+  /** WebSocket signaling server URL (preferred, supports trickle ICE) */
+  wsSignalingUrl?: string;
   /** Pre-configured remote SDP answer (for file-based signaling) */
   remoteAnswer?: RTCSessionDescriptionInit;
   /** Connection timeout in milliseconds (default: 30000) */
   timeout?: number;
   /** Data channel label (default: 'nhp') */
   channelLabel?: string;
+}
+
+/** Signaling message format for WebSocket communication */
+interface SignalingMessage {
+  type: 'offer' | 'answer' | 'candidate' | 'error';
+  sdp?: RTCSessionDescriptionInit;
+  candidate?: RTCIceCandidateInit;
+  error?: string;
 }
 
 /** Default configuration values */
@@ -45,9 +59,11 @@ export type WebRTCTransportEvent = TransportEvent | 'offer';
 export class WebRTCTransport {
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
+  private ws: WebSocket | null = null;
   private config: WebRTCTransportConfig & typeof DEFAULT_CONFIG;
   private state: ConnectionState = 'disconnected';
   private eventHandlers: Map<WebRTCTransportEvent, Set<EventHandler>> = new Map();
+  private pendingCandidates: RTCIceCandidateInit[] = [];
 
   constructor(config: WebRTCTransportConfig = {}) {
     this.config = {
@@ -81,7 +97,7 @@ export class WebRTCTransport {
     const offer = await this.pc!.createOffer();
     await this.pc!.setLocalDescription(offer);
 
-    // Wait for ICE gathering to complete
+    // Wait for ICE gathering to complete (for non-trickle ICE)
     await this.waitForIceGathering();
 
     const localDesc = this.pc!.localDescription;
@@ -103,6 +119,30 @@ export class WebRTCTransport {
     }
 
     await this.pc.setRemoteDescription(answer);
+
+    // Add any pending ICE candidates
+    for (const candidate of this.pendingCandidates) {
+      await this.pc.addIceCandidate(candidate);
+    }
+    this.pendingCandidates = [];
+  }
+
+  /**
+   * Add an ICE candidate from the remote peer
+   */
+  async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    if (!this.pc) {
+      // Queue candidate for later
+      this.pendingCandidates.push(candidate);
+      return;
+    }
+
+    if (this.pc.remoteDescription) {
+      await this.pc.addIceCandidate(candidate);
+    } else {
+      // Queue candidate until remote description is set
+      this.pendingCandidates.push(candidate);
+    }
   }
 
   /**
@@ -117,19 +157,23 @@ export class WebRTCTransport {
     this.state = 'connecting';
 
     try {
-      // Create offer
-      const offer = await this.createOffer();
-
       // If we have a pre-configured answer, use it
       if (this.config.remoteAnswer) {
+        const offer = await this.createOffer();
         await this.setAnswer(this.config.remoteAnswer);
       }
-      // If we have a signaling URL, exchange via HTTP
+      // Prefer WebSocket signaling if available
+      else if (this.config.wsSignalingUrl) {
+        await this.connectViaWebSocket();
+      }
+      // Fall back to HTTP signaling
       else if (this.config.signalingUrl) {
+        const offer = await this.createOffer();
         const answer = await this.exchangeViaSignaling(offer);
         await this.setAnswer(answer);
       } else {
         // Manual signaling - emit offer and wait for setAnswer to be called
+        const offer = await this.createOffer();
         this.emit('offer', offer);
         // The caller must call setAnswer() with the server's response
       }
@@ -143,6 +187,167 @@ export class WebRTCTransport {
       this.state = 'disconnected';
       this.emit('error', err);
       throw err;
+    }
+  }
+
+  /**
+   * Connect using WebSocket signaling with trickle ICE support
+   */
+  private async connectViaWebSocket(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('WebSocket signaling timeout'));
+      }, this.config.timeout);
+
+      const wsUrl = this.config.wsSignalingUrl!;
+      console.log(`[WebRTC] Connecting to signaling server: ${wsUrl}`);
+      
+      this.ws = new WebSocket(wsUrl);
+
+      this.ws.onopen = async () => {
+        console.log('[WebRTC] WebSocket connected, initializing peer connection');
+        try {
+          // Initialize peer connection with trickle ICE support
+          await this.initPeerConnectionWithTrickleICE();
+
+          // Create data channel
+          this.dc = this.pc!.createDataChannel(this.config.channelLabel, {
+            ordered: true,
+          });
+          this.setupDataChannel();
+
+          // Create and send offer
+          const offer = await this.pc!.createOffer();
+          await this.pc!.setLocalDescription(offer);
+
+          console.log('[WebRTC] Sending SDP offer');
+          this.sendSignalingMessage({
+            type: 'offer',
+            sdp: offer,
+          });
+        } catch (err) {
+          clearTimeout(timeout);
+          reject(err);
+        }
+      };
+
+      this.ws.onmessage = async (event) => {
+        try {
+          const msg: SignalingMessage = JSON.parse(event.data);
+          console.log(`[WebRTC] Received signaling message: ${msg.type}`);
+
+          switch (msg.type) {
+            case 'answer':
+              if (msg.sdp) {
+                await this.setAnswer(msg.sdp);
+                console.log('[WebRTC] Remote description set');
+                // Don't resolve yet - wait for data channel to open
+              }
+              break;
+
+            case 'candidate':
+              if (msg.candidate) {
+                await this.addIceCandidate(msg.candidate);
+                console.log('[WebRTC] Added ICE candidate');
+              }
+              break;
+
+            case 'error':
+              console.error('[WebRTC] Signaling error:', msg.error);
+              clearTimeout(timeout);
+              reject(new Error(msg.error || 'Signaling error'));
+              break;
+          }
+        } catch (err) {
+          console.error('[WebRTC] Error processing signaling message:', err);
+        }
+      };
+
+      this.ws.onerror = (event) => {
+        console.error('[WebRTC] WebSocket error:', event);
+        clearTimeout(timeout);
+        reject(new Error('WebSocket signaling error'));
+      };
+
+      this.ws.onclose = () => {
+        console.log('[WebRTC] WebSocket closed');
+        // Only reject if we haven't connected yet
+        if (this.state === 'connecting') {
+          clearTimeout(timeout);
+          reject(new Error('WebSocket closed before connection established'));
+        }
+      };
+
+      // Resolve when data channel opens
+      const checkDataChannel = setInterval(() => {
+        if (this.dc?.readyState === 'open') {
+          clearInterval(checkDataChannel);
+          clearTimeout(timeout);
+          console.log('[WebRTC] Data channel open, connection complete');
+          resolve();
+        }
+      }, 100);
+    });
+  }
+
+  /**
+   * Initialize peer connection with trickle ICE (candidates sent as they're discovered)
+   */
+  private async initPeerConnectionWithTrickleICE(): Promise<void> {
+    const iceServers: RTCIceServer[] = [];
+
+    // Add STUN servers
+    if (this.config.stunServers) {
+      for (const url of this.config.stunServers) {
+        iceServers.push({ urls: url });
+      }
+    }
+
+    // Add TURN servers
+    if (this.config.turnServers) {
+      iceServers.push(...this.config.turnServers);
+    }
+
+    this.pc = new RTCPeerConnection({
+      iceServers,
+    });
+
+    // Send ICE candidates to the signaling server as they're discovered (trickle ICE)
+    this.pc.onicecandidate = (event) => {
+      if (event.candidate && this.ws?.readyState === WebSocket.OPEN) {
+        console.log('[WebRTC] Sending ICE candidate');
+        this.sendSignalingMessage({
+          type: 'candidate',
+          candidate: event.candidate.toJSON(),
+        });
+      }
+    };
+
+    this.pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC] ICE connection state: ${this.pc?.iceConnectionState}`);
+      if (this.pc?.iceConnectionState === 'failed') {
+        this.emit('error', new Error('ICE connection failed'));
+      } else if (this.pc?.iceConnectionState === 'disconnected') {
+        this.state = 'disconnected';
+        this.emit('close', undefined);
+      }
+    };
+
+    this.pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC] Connection state: ${this.pc?.connectionState}`);
+      if (this.pc?.connectionState === 'failed') {
+        this.emit('error', new Error('Peer connection failed'));
+        this.state = 'disconnected';
+      }
+    };
+  }
+
+  /**
+   * Send a signaling message via WebSocket
+   */
+  private sendSignalingMessage(msg: SignalingMessage): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
     }
   }
 
@@ -179,6 +384,10 @@ export class WebRTCTransport {
    * Disconnect from the WebRTC peer
    */
   disconnect(): void {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
     if (this.dc) {
       this.dc.close();
       this.dc = null;
@@ -187,6 +396,7 @@ export class WebRTCTransport {
       this.pc.close();
       this.pc = null;
     }
+    this.pendingCandidates = [];
     this.state = 'disconnected';
     this.emit('close', undefined);
   }
