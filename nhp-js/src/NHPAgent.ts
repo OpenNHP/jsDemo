@@ -25,6 +25,7 @@ import { NHP_PACKET_TYPES } from './protocol/constants.js';
 import { WebSocketTransport } from './transport/websocket.js';
 import { UdpTransport } from './transport/udp.js';
 import { WebRTCTransport } from './transport/webrtc.js';
+import { HttpRelayTransport } from './transport/relay.js';
 
 /** Common transport interface */
 interface Transport {
@@ -40,7 +41,7 @@ interface Transport {
 const isBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
 
 /** Default agent configuration */
-const DEFAULT_CONFIG: Required<Omit<NHPAgentConfig, 'privateKey'>> = {
+const DEFAULT_CONFIG: Required<Omit<NHPAgentConfig, 'privateKey' | 'relayUrl'>> = {
   cipherScheme: 'curve25519',
   logLevel: 'error',
   transport: isBrowser ? 'webrtc' : 'udp',
@@ -84,7 +85,7 @@ const DEFAULT_CONFIG: Required<Omit<NHPAgentConfig, 'privateKey'>> = {
  * ```
  */
 export class NHPAgent {
-  private config: Required<Omit<NHPAgentConfig, 'privateKey'>> & { privateKey?: string };
+  private config: Required<Omit<NHPAgentConfig, 'privateKey' | 'relayUrl'>> & { privateKey?: string; relayUrl?: string };
   private keyPair: KeyPairBase64 | null = null;
   private identity: AgentIdentity | null = null;
   private servers: Map<string, ServerConfig> = new Map();
@@ -178,7 +179,7 @@ export class NHPAgent {
    * Add a server configuration
    */
   addServer(config: ServerConfig): void {
-    const serverId = config.id ?? `${config.host}:${config.port}`;
+    const serverId = config.id ?? (config.host ? `${config.host}:${config.port}` : config.publicKey.substring(0, 16));
     this.servers.set(serverId, { ...config, id: serverId });
     this.log('debug', `Server added: ${serverId}`);
   }
@@ -232,13 +233,27 @@ export class NHPAgent {
       };
     }
 
-    const serverId = `${resource.serverHost}:${resource.serverPort}`;
-    const server = this.servers.get(serverId);
+    let server: ServerConfig | undefined;
+    let serverId: string;
+
+    if (resource.serverHost && resource.serverPort) {
+      // Direct mode: lookup by host:port
+      serverId = `${resource.serverHost}:${resource.serverPort}`;
+      server = this.servers.get(serverId);
+    } else {
+      // Relay mode: use the first (and typically only) registered server
+      const first = this.servers.entries().next();
+      if (!first.done) {
+        [serverId, server] = first.value;
+      } else {
+        serverId = '';
+      }
+    }
 
     if (!server) {
       return {
         success: false,
-        error: `Server not configured: ${serverId}`,
+        error: `Server not configured${serverId ? ': ' + serverId : ''}. Call addServer() first.`,
         errorCode: 3,
       };
     }
@@ -352,23 +367,28 @@ export class NHPAgent {
     this.emit('knock', { resource, packetType, packet });
 
     // Get or create transport
-    const serverId = `${resource.serverHost}:${resource.serverPort}`;
+    const serverId = server.id!;
     let transport = this.transports.get(serverId);
     if (!transport) {
-      transport = this.createTransport(resource.serverHost, resource.serverPort);
+      transport = this.createTransport(server.host ?? '', server.port ?? 0);
       this.transports.set(serverId, transport);
     }
 
+    // The Go server's encryptBody/decryptBody both clear chainKey via defer,
+    // so both sides of the Noise chain effectively restart from all-zeros.
+    // Pass an all-zeros prevChainKey to match this behavior.
+    const zeroChainKey = new Uint8Array(32);
+
     // Send packet and wait for response
-    return this.sendAndWaitForResponse(transport, packet, server.publicKey);
+    return this.sendAndWaitForResponse(transport, packet, server.publicKey, zeroChainKey);
   }
 
   private parseAckResponse(message: string): KnockResult {
     try {
       const ackMsg: ServerKnockAckMsg = JSON.parse(message);
 
-      // Check for error
-      if (ackMsg.errCode && ackMsg.errCode !== '') {
+      // Check for error — errCode "0" or "" means success
+      if (ackMsg.errCode && ackMsg.errCode !== '' && ackMsg.errCode !== '0') {
         return {
           success: false,
           error: ackMsg.errMsg || `Server error: ${ackMsg.errCode}`,
@@ -427,6 +447,17 @@ export class NHPAgent {
           autoReconnect: false,
         }) as Transport;
 
+      case 'relay': {
+        const relayUrl = this.config.relayUrl;
+        if (!relayUrl) {
+          throw new Error(
+            '[NHPAgent] transport="relay" requires relayUrl to be set in NHPAgentConfig'
+          );
+        }
+        this.log('debug', `Creating HTTP relay transport via ${relayUrl}`);
+        return new HttpRelayTransport({ relayUrl }) as unknown as Transport;
+      }
+
       default:
         throw new Error(`Unsupported transport type: ${transportType}`);
     }
@@ -435,7 +466,8 @@ export class NHPAgent {
   private async sendAndWaitForResponse(
     transport: Transport,
     packet: Uint8Array,
-    serverPublicKey: string
+    serverPublicKey: string,
+    prevChainKey?: Uint8Array
   ): Promise<ParsedPacket> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -453,12 +485,36 @@ export class NHPAgent {
           }
 
           const message = msg as { data: Uint8Array };
-          const parsed = await parseNHPPacket(
-            message.data,
-            this.keyPair.privateKey,
-            this.keyPair.publicKey,
-            serverPublicKey
-          );
+
+          // Try parsing with the previous chain key first (real server
+          // continues the Noise chain from the KNK).  If that fails, fall
+          // back to a fresh chain key (self-test / standalone ACK).
+          let parsed: ParsedPacket;
+          if (prevChainKey) {
+            try {
+              parsed = await parseNHPPacket(
+                message.data,
+                this.keyPair.privateKey,
+                this.keyPair.publicKey,
+                serverPublicKey,
+                prevChainKey
+              );
+            } catch {
+              parsed = await parseNHPPacket(
+                message.data,
+                this.keyPair.privateKey,
+                this.keyPair.publicKey,
+                serverPublicKey
+              );
+            }
+          } else {
+            parsed = await parseNHPPacket(
+              message.data,
+              this.keyPair.privateKey,
+              this.keyPair.publicKey,
+              serverPublicKey
+            );
+          }
 
           resolve(parsed);
         } catch (err) {

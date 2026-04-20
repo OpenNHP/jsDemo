@@ -107,12 +107,12 @@ export function sm2ECDH(privateKey: Uint8Array, publicKey: Uint8Array): Uint8Arr
   // Add 04 prefix for uncompressed point format
   const publicKeyHex = '04' + bytesToHex(publicKey);
 
-  // sm2.ecdh returns the shared secret as Uint8Array
+  // sm2.ecdh returns a compressed EC point (33 bytes: 02/03 prefix + 32-byte X coordinate).
+  // The shared secret is the X coordinate only (matching Go's crypto/ecdh convention).
   const sharedSecret = sm2.ecdh(privateKeyHex, publicKeyHex);
 
-  // Return only the X coordinate (first 32 bytes) as the shared secret
-  // This matches the Go implementation
-  return sharedSecret.slice(0, 32);
+  // Skip the 1-byte compression prefix, return the 32-byte X coordinate
+  return sharedSecret.slice(1, 33);
 }
 
 /**

@@ -37,6 +37,7 @@ import {
 import {
   sm3,
   hmacSM3,
+  newSM3Hash,
   keyGenSM3_2,
   mixKeySM3,
   mixHashSM3,
@@ -44,6 +45,7 @@ import {
 import { sm4GcmSeal, sm4GcmOpen } from '../crypto/sm4.js';
 import {
   base64ToBytes,
+  bytesToBase64,
   stringToBytes,
   bytesToString,
   equalBytes,
@@ -54,10 +56,32 @@ import {
 } from '../crypto/utils.js';
 
 // Global state for packet management
-let globalCounter = 0n;
+// Seed counter from current time so page reloads don't trigger anti-replay on server
+let globalCounter = BigInt(Date.now()) * 1000000n; // milliseconds → nanoseconds
 const serverCookieMap = new Map<string, Uint8Array>();
 const lastSendTimeMap = new Map<string, bigint>();
 const lastRemoteSendTimeMap = new Map<string, bigint>();
+
+// Stores the chain key produced by buildNHPPacket, keyed by remotePublicKey.
+// The NHP Noise protocol is a continuous chain: the server's ACK is encrypted
+// starting from the chain key left over after decrypting the agent's KNK.
+// parseNHPPacket uses this saved key as the starting point instead of
+// re-deriving from scratch.  Only populated when callers pass
+// prevChainKey to parseNHPPacket (see NHPAgent).
+const lastBuildChainKeyMap = new Map<string, Uint8Array>();
+
+/**
+ * Retrieve and consume the chain key saved by the most recent buildNHPPacket
+ * call for the given remotePublicKey.  Returns undefined if no key was saved.
+ * The entry is deleted after retrieval so it cannot be re-used accidentally.
+ */
+export function consumeLastBuildChainKey(remotePublicKey: string): Uint8Array | undefined {
+  const ck = lastBuildChainKeyMap.get(remotePublicKey);
+  if (ck) {
+    lastBuildChainKeyMap.delete(remotePublicKey);
+  }
+  return ck;
+}
 
 /**
  * Build an NHP packet for transmission
@@ -185,6 +209,10 @@ export async function buildNHPPacket(
   updateBlake2s(hmacHasher, packet.subarray(0, header.size - FIELD_SIZES.HMAC));
   header.hmac = sumBlake2s(hmacHasher);
 
+  // Save the final chain key so parseNHPPacket can continue the Noise chain
+  // when decrypting the server's ACK response.
+  lastBuildChainKeyMap.set(remotePublicKey, new Uint8Array(chainKey));
+
   return packet.subarray(0, header.size + payloadSize);
 }
 
@@ -200,20 +228,23 @@ export async function parseNHPPacket(
   packet: Uint8Array,
   privateKey: string,
   publicKey: string,
-  remotePublicKey: string
+  remotePublicKey: string,
+  prevChainKey?: Uint8Array
 ): Promise<ParsedPacket> {
   if (packet.length < HEADER_SIZE) {
     throw new Error('Packet size is too small');
   }
 
-  // Check if this is an extended (GMSM) packet by checking size or flags
-  // Extended packets are at least 304 bytes
-  if (packet.length >= HEADER_EX_SIZE) {
-    // Peek at flags to check if extended
-    const flagByte = packet[10] | (packet[11] << 8);
-    if (flagByte & 0x1) {
-      return parseNHPPacketGMSM(packet, privateKey, publicKey, remotePublicKey);
-    }
+  // Check if this is an extended (GMSM) packet by reading the flags field directly.
+  // The flags field is at a fixed offset (10-11) in both standard and extended headers,
+  // so we can safely peek at it before deciding which parser to use.
+  // Do NOT rely on packet.length >= HEADER_EX_SIZE: a GMSM packet with a small payload
+  // can be shorter than 304 bytes, causing misrouting.
+  // Read flags as big-endian uint16 to match DataView.getUint16 used in NHPHeader/NHPHeaderEx.
+  // FLAGS field is at offset 10-11. Big-endian: high byte at [10], low byte at [11].
+  const flagByte = (packet[10] << 8) | packet[11];
+  if (flagByte & 0x1) {
+    return parseNHPPacketGMSM(packet, privateKey, publicKey, remotePublicKey, prevChainKey);
   }
 
   // Create a clean ArrayBuffer copy to avoid SharedArrayBuffer issues
@@ -256,14 +287,22 @@ export async function parseNHPPacket(
   const tsStatic = header.timestamp;
   const msgStatic = packet.subarray(header.size);
 
-  // Initialize chain key and hash
+  // Initialize chain key and hash.
+  // The NHP Noise protocol is a continuous chain: the server encrypts its ACK
+  // starting from the chain key left over after decrypting the agent's KNK.
+  // When prevChainKey is provided, resume from it; otherwise start fresh.
   const chainKey = new Uint8Array(32);
   const chainHash = new Uint8Array(32);
   const chainHasher = newBlake2sHash();
 
   updateBlake2s(chainHasher, stringToBytes(INITIAL_HASH_STRING));
   chainHash.set(sumBlake2s(chainHasher));
-  chainKey.set(mixKey(chainHash, stringToBytes(INITIAL_CHAIN_KEY_STRING)));
+
+  if (prevChainKey) {
+    chainKey.set(prevChainKey);
+  } else {
+    chainKey.set(mixKey(chainHash, stringToBytes(INITIAL_CHAIN_KEY_STRING)));
+  }
 
   updateBlake2s(chainHasher, localPubKeyBytes);
   updateBlake2s(chainHasher, ephemeralPublicKeyBytes);
@@ -352,6 +391,7 @@ export function clearServerCookie(remotePublicKey: string): void {
  */
 export function resetGlobalCounter(): void {
   globalCounter = 0n;
+  lastBuildChainKeyMap.clear();
 }
 
 /**
@@ -381,36 +421,48 @@ async function buildNHPPacketGMSM(
   header.counter = globalCounter;
   const nonce = header.nonce;
 
-  // Initialize chain key and hash using SM3
-  let chainKey = sm3(stringToBytes(INITIAL_HASH_STRING));
-  let chainHash = sm3(stringToBytes(INITIAL_HASH_STRING));
-  chainKey = mixKeySM3(chainHash, stringToBytes(INITIAL_CHAIN_KEY_STRING))[0];
+  // Initialize chain key and chain hash using SM3 (streaming, matching Go's hash.Hash pattern)
+  const chainHasher = newSM3Hash();
+  chainHasher.update(stringToBytes(INITIAL_HASH_STRING));  // ChainHash0 state
+  const chainHash0 = chainHasher.sum();
+  let chainKey = mixKeySM3(chainHash0, stringToBytes(INITIAL_CHAIN_KEY_STRING))[0];
 
-  // HMAC data accumulator
+  // HMAC data accumulator (plain SM3, not HMAC-SM3)
   let hmacData = concatBytes(stringToBytes(INITIAL_HASH_STRING), remotePubKeyBytes);
 
-  // Mix in remote public key
-  chainHash = mixHashSM3(chainHash, remotePubKeyBytes);
+  // Mix in remote public key → ChainHash0 state + remotePubKey
+  chainHasher.update(remotePubKeyBytes);
 
   // Generate ephemeral SM2 key pair and perform ECDH
   const ephemeralKeys = generateSM2KeyPair();
   const ephemeralPublicKeyBytes = ephemeralKeys.publicKey;
   header.ephemeral = ephemeralPublicKeyBytes;
 
-  chainHash = mixHashSM3(chainHash, ephemeralPublicKeyBytes);
+  // ChainHash state += ephemeralPubKey
+  chainHasher.update(ephemeralPublicKeyBytes);
   chainKey = mixKeySM3(chainKey, ephemeralPublicKeyBytes)[0];
 
   // SM2 ECDH: ephemeral private * remote public
   const ess = sm2ECDH(ephemeralKeys.privateKey, remotePubKeyBytes);
 
-  // Encrypt local public key using SM4-GCM
+  // Encrypt local public key using SM4-GCM (AD = current chainHash snapshot)
   const derivedKeys0 = keyGenSM3_2(chainKey, ess);
   chainKey = derivedKeys0[0];
 
-  const keyStatic = sm4GcmSeal(derivedKeys0[1].slice(0, 16), nonce, localPubKeyBytes, chainHash);
+  const chainHashSnap = chainHasher.sum();
+  // Debug: print intermediate values for cross-implementation comparison
+  console.debug('[GMSM-BUILD] chainHash(after pubkey+ephemeral):', bytesToBase64(chainHashSnap));
+  console.debug('[GMSM-BUILD] chainKey(after MixKey):', bytesToBase64(chainKey));
+  console.debug('[GMSM-BUILD] ess:', bytesToBase64(ess));
+  console.debug('[GMSM-BUILD] aead key:', bytesToBase64(derivedKeys0[1].slice(0, 16)));
+  console.debug('[GMSM-BUILD] nonce:', bytesToBase64(nonce));
+  console.debug('[GMSM-BUILD] localPubKey len:', localPubKeyBytes.length, 'remotePubKey len:', remotePubKeyBytes.length);
+
+  const keyStatic = sm4GcmSeal(derivedKeys0[1].slice(0, 16), nonce, localPubKeyBytes, chainHashSnap);
   header.static = keyStatic;
 
-  chainHash = mixHashSM3(chainHash, keyStatic);
+  // Evolve chainHash with static ciphertext
+  chainHasher.update(keyStatic);
 
   // SM2 ECDH: local private * remote public
   const ss = sm2ECDH(localPrivKeyBytes, remotePubKeyBytes);
@@ -426,26 +478,27 @@ async function buildNHPPacketGMSM(
   const ts = new Uint8Array(tsBuf);
   lastSendTimeMap.set(remotePublicKey, timestamp);
 
-  const tsStatic = sm4GcmSeal(derivedKeys1[1].slice(0, 16), nonce, ts, chainHash);
+  const tsStatic = sm4GcmSeal(derivedKeys1[1].slice(0, 16), nonce, ts, chainHasher.sum());
   header.timestamp = tsStatic;
 
   // Encrypt message payload
   const derivedKeys2 = keyGenSM3_2(chainKey, tsStatic);
   chainKey = derivedKeys2[0];
-  chainHash = mixHashSM3(chainHash, tsStatic);
+  chainHasher.update(tsStatic);
 
   let payload = msgBytes;
   if (compress) {
     payload = await zlibCompress(msgBytes);
   }
 
-  const msgStatic = sm4GcmSeal(derivedKeys2[1].slice(0, 16), nonce, payload, chainHash);
+  const msgStatic = sm4GcmSeal(derivedKeys2[1].slice(0, 16), nonce, payload, chainHasher.sum());
   packet.set(msgStatic, header.size);
 
   const payloadSize = payload.byteLength + FIELD_SIZES.AEAD_TAG;
   header.typeAndPayloadSize = { type, size: payloadSize };
 
-  // Compute HMAC using SM3
+  // Compute HMAC using plain SM3 hash (matching Go server's hmacHash pattern):
+  //   SM3(InitialHashString || serverPubKey || [cookie] || header[0:size-32])
   if (type === NHP_PACKET_TYPES.RNK) {
     const cookie = serverCookieMap.get(remotePublicKey);
     if (cookie) {
@@ -453,7 +506,11 @@ async function buildNHPPacketGMSM(
     }
   }
   hmacData = concatBytes(hmacData, packet.subarray(0, header.size - FIELD_SIZES.HMAC));
-  header.hmac = hmacSM3(chainHash, hmacData);
+  header.hmac = sm3(hmacData);
+
+  // Save the final chain key so parseNHPPacketGMSM can continue the Noise chain
+  // when decrypting the server's ACK response.
+  lastBuildChainKeyMap.set(remotePublicKey, new Uint8Array(chainKey));
 
   return packet.subarray(0, header.size + payloadSize);
 }
@@ -465,7 +522,8 @@ async function parseNHPPacketGMSM(
   packet: Uint8Array,
   privateKey: string,
   publicKey: string,
-  remotePublicKey: string
+  remotePublicKey: string,
+  prevChainKey?: Uint8Array
 ): Promise<ParsedPacket> {
   // Create a clean ArrayBuffer copy
   const packetBuffer = new ArrayBuffer(packet.length);
@@ -490,14 +548,14 @@ async function parseNHPPacketGMSM(
   const localPubKeyBytes = base64ToBytes(publicKey);
   const remotePubKeyBytes = base64ToBytes(remotePublicKey);
 
-  // Verify HMAC using SM3
+  // Verify HMAC using plain SM3 hash (matching Go server's hmacHash pattern):
+  //   SM3(InitialHashString || localPubKey || header[0:size-32])
   const hmacData = concatBytes(
     stringToBytes(INITIAL_HASH_STRING),
     localPubKeyBytes,
     packet.subarray(0, header.size - FIELD_SIZES.HMAC)
   );
-  const chainHashInit = sm3(stringToBytes(INITIAL_HASH_STRING));
-  const checkSum = hmacSM3(chainHashInit, hmacData);
+  const checkSum = sm3(hmacData);
 
   if (!equalBytes(checkSum, header.hmac)) {
     throw new Error('HMAC check failed');
@@ -509,28 +567,36 @@ async function parseNHPPacketGMSM(
   const tsStatic = header.timestamp;
   const msgStatic = packet.subarray(header.size);
 
-  // Initialize chain key and hash using SM3
-  let chainKey = sm3(stringToBytes(INITIAL_HASH_STRING));
-  let chainHash = sm3(stringToBytes(INITIAL_HASH_STRING));
-  chainKey = mixKeySM3(chainHash, stringToBytes(INITIAL_CHAIN_KEY_STRING))[0];
+  // Initialize chain key and chain hash using SM3 (streaming, matching Go's hash.Hash pattern).
+  // The NHP Noise protocol is a continuous chain: the server encrypts its ACK
+  // starting from the chain key left over after decrypting the agent's KNK.
+  // When prevChainKey is provided, resume from it; otherwise start fresh.
+  const chainHasher = newSM3Hash();
+  chainHasher.update(stringToBytes(INITIAL_HASH_STRING));  // ChainHash0 state
+  const chainHash0 = chainHasher.sum();
 
-  chainHash = mixHashSM3(chainHash, localPubKeyBytes);
-  chainHash = mixHashSM3(chainHash, ephemeralPublicKeyBytes);
+  let chainKey = prevChainKey
+    ? new Uint8Array(prevChainKey)
+    : mixKeySM3(chainHash0, stringToBytes(INITIAL_CHAIN_KEY_STRING))[0];
+
+  // Note: for parse (responder), we use localPubKey (= device public key on responder side)
+  chainHasher.update(localPubKeyBytes);
+  chainHasher.update(ephemeralPublicKeyBytes);
   chainKey = mixKeySM3(chainKey, ephemeralPublicKeyBytes)[0];
 
   // SM2 ECDH: local private * ephemeral public
   const ess = sm2ECDH(localPrivKeyBytes, ephemeralPublicKeyBytes);
 
-  // Decrypt remote public key
+  // Decrypt remote public key (AD = current chainHash snapshot)
   const derivedKeys0 = keyGenSM3_2(chainKey, ess);
   chainKey = derivedKeys0[0];
-  const decryptedPubKeyBytes = sm4GcmOpen(derivedKeys0[1].slice(0, 16), nonce, keyStatic, chainHash);
+  const decryptedPubKeyBytes = sm4GcmOpen(derivedKeys0[1].slice(0, 16), nonce, keyStatic, chainHasher.sum());
 
   if (!equalBytes(remotePubKeyBytes, decryptedPubKeyBytes)) {
     throw new Error('Remote public key check failed');
   }
 
-  chainHash = mixHashSM3(chainHash, keyStatic);
+  chainHasher.update(keyStatic);
 
   // SM2 ECDH: local private * remote public
   const ss = sm2ECDH(localPrivKeyBytes, remotePubKeyBytes);
@@ -539,7 +605,7 @@ async function parseNHPPacketGMSM(
   const derivedKeys1 = keyGenSM3_2(chainKey, ss);
   chainKey = derivedKeys1[0];
 
-  const decryptedTs = sm4GcmOpen(derivedKeys1[1].slice(0, 16), nonce, tsStatic, chainHash);
+  const decryptedTs = sm4GcmOpen(derivedKeys1[1].slice(0, 16), nonce, tsStatic, chainHasher.sum());
   const tsBuf = new ArrayBuffer(decryptedTs.length);
   new Uint8Array(tsBuf).set(decryptedTs);
   const tsView = new DataView(tsBuf);
@@ -565,9 +631,9 @@ async function parseNHPPacketGMSM(
   // Decrypt message
   const derivedKeys2 = keyGenSM3_2(chainKey, header.timestamp);
   chainKey = derivedKeys2[0];
-  chainHash = mixHashSM3(chainHash, tsStatic);
+  chainHasher.update(tsStatic);
 
-  let msg = sm4GcmOpen(derivedKeys2[1].slice(0, 16), nonce, msgStatic, chainHash);
+  let msg = sm4GcmOpen(derivedKeys2[1].slice(0, 16), nonce, msgStatic, chainHasher.sum());
 
   if (compressed) {
     msg = await zlibDecompress(msg);

@@ -9,7 +9,7 @@ export type CipherScheme = 'curve25519' | 'gmsm';
 export type LogLevel = 'silent' | 'error' | 'info' | 'debug';
 
 /** Transport type for NHP communication */
-export type TransportType = 'udp' | 'webrtc' | 'websocket';
+export type TransportType = 'udp' | 'webrtc' | 'websocket' | 'relay';
 
 /** Configuration for initializing the NHP Agent */
 export interface NHPAgentConfig {
@@ -21,18 +21,23 @@ export interface NHPAgentConfig {
   logLevel?: LogLevel;
   /** Transport type to use (default: 'udp' for Node.js, 'webrtc' for browser) */
   transport?: TransportType;
+  /**
+   * Full URL of the HTTP relay endpoint (required when transport='relay').
+   * Example: "https://relay.example.com/relay"
+   */
+  relayUrl?: string;
 }
 
 /** Configuration for an NHP server */
 export interface ServerConfig {
-  /** Unique identifier for the server */
+  /** Unique identifier for the server (auto-generated from host:port if omitted) */
   id?: string;
   /** Base64-encoded public key of the server */
   publicKey: string;
-  /** Server hostname or IP address */
-  host: string;
-  /** Server port number */
-  port: number;
+  /** Server hostname or IP address (required for udp/webrtc/websocket, optional for relay) */
+  host?: string;
+  /** Server port number (required for udp/webrtc/websocket, optional for relay) */
+  port?: number;
   /** Optional expiration timestamp (Unix milliseconds) */
   expiresAt?: number;
 }
@@ -43,10 +48,10 @@ export interface ResourceConfig {
   resourceId: string;
   /** Service identifier */
   serviceId: string;
-  /** Server hostname for the knock */
-  serverHost: string;
-  /** Server port for the knock */
-  serverPort: number;
+  /** Server hostname for the knock (optional for relay transport) */
+  serverHost?: string;
+  /** Server port for the knock (optional for relay transport) */
+  serverPort?: number;
 }
 
 /** Result of a knock operation */
