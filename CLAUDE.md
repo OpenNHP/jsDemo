@@ -4,75 +4,139 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenNHP JavaScript Agent - A JavaScript implementation of the NHP (Network-infrastructure Hiding Protocol) for zero-trust network security. The project demonstrates NHP authentication flows and connection status visualization.
+OpenNHP JavaScript Agent — A TypeScript/JavaScript SDK (`@opennhp/agent`) implementing the NHP (Network-infrastructure Hiding Protocol) for zero-trust network security, plus a static demo page.
 
 **Live Demo:** https://js-agent.opennhp.org
 
-## Project Structure
+## Repository Structure
 
-The repository has two main components:
+Two independent components:
 
-1. **Root-level demo** (`/index.html`) - Static HTML demo page with i18n support (EN/ZH/ES) that demonstrates the NHP authentication flow via Okta integration. Deployed directly to GitHub Pages.
+1. **`/index.html`** — Static demo page with i18n (EN/ZH/ES) and Okta OAuth integration. Deployed to GitHub Pages at `js-agent.opennhp.org`.
 
-2. **NHP-JS library** (`/nhp-js/`) - The core NHP protocol implementation as a Vite-bundled JavaScript library.
+2. **`/nhp-js/`** — Core SDK library. TypeScript source in `src/`, built with Vite into `dist/`.
 
-## Build Commands
+## Build & Dev Commands
 
-All commands must be run from the `/nhp-js` directory:
+All commands run from `/nhp-js/`:
 
 ```bash
 cd nhp-js
-
-# Install dependencies
 npm install
 
-# Development server with hot reload
-npm run dev
+npm run dev          # Vite dev server (http://localhost:5173), loads main.js
+npm run build        # Build to dist/ (ES + CJS + .d.ts)
+npm run preview      # Preview production build
 
-# Build the library (outputs to nhp-js/dist/)
-npm run build
+npm test             # Vitest watch mode
+npm run test:run     # Run tests once
+npm run test:coverage  # Coverage report in coverage/
 
-# Preview the production build
-npm run preview
+npm run lint         # ESLint
+npm run lint:fix     # Auto-fix
+npm run format       # Prettier
+npm run docs         # TypeDoc → docs/
 ```
 
-The build produces `nhp-js/dist/nhp-js-lib.js` which is imported by `main.js` for testing.
+Build outputs: `dist/index.js` (ESM), `dist/index.cjs` (CJS), `dist/index.d.ts` (types).
 
 ## Architecture
 
-### NHP Protocol Library (`nhp-js/src/`)
+### Source layout (`nhp-js/src/`)
 
-- **nhp.js** - Main entry point. Implements NHP packet building and parsing:
-  - `buildNHPPacket()` - Constructs encrypted NHP packets with X25519 key exchange
-  - `parseNHPPacket()` - Decrypts and validates incoming NHP packets
-  - `NHPHeader` / `NHPHeaderEx` - Binary packet header structures (240 / 304 bytes)
-  - Packet types: KNK (1), ACK (2), COK (7), RNK (8)
+```text
+src/
+├── index.ts          # Public API exports
+├── NHPAgent.ts       # High-level agent class (main SDK entry point)
+├── types.ts          # All TypeScript interfaces and enums
+├── crypto/
+│   ├── index.ts      # Re-exports key crypto utilities
+│   ├── ecdh.ts       # X25519 key generation and ECDH
+│   ├── aead.ts       # AES-256-GCM encrypt/decrypt
+│   ├── noise.ts      # Blake2s hash, HMAC, HKDF-like key derivation (Noise protocol)
+│   ├── sm2.ts        # SM2 elliptic curve key generation and ECDH (GMSM)
+│   ├── sm3.ts        # SM3 hash and HMAC (GMSM)
+│   ├── sm4.ts        # SM4-GCM encrypt/decrypt (GMSM)
+│   └── utils.ts      # base64, hex, zlib compress/decompress, getUnixNano
+├── protocol/
+│   ├── index.ts      # Re-exports
+│   ├── constants.ts  # Packet types, header sizes, offsets, field sizes
+│   ├── header.ts     # NHPHeader (240 B, curve25519) / NHPHeaderEx (304 B, gmsm)
+│   └── packet.ts     # buildNHPPacket(), parseNHPPacket(), clearServerCookie()
+└── transport/
+    ├── index.ts      # Re-exports
+    ├── udp.ts        # UDP transport (Node.js default)
+    ├── webrtc.ts     # WebRTC DataChannel transport (experimental)
+    ├── websocket.ts  # WebSocket transport (legacy)
+    └── relay.ts      # HTTP Relay transport (browser → relay → NHP Server)
+```
 
-- **crypto.js** - Cryptographic primitives:
-  - X25519 key generation and ECDH via Web Crypto API
-  - PKCS#8 encoding/decoding for private keys
-  - SHA-256 hashing and HMAC via CryptoJS
-  - ChaCha20-Poly1305 AEAD encryption via @noble/ciphers
+### Key classes and functions
 
-- **crypto_gm.js** - Chinese GM/T cryptographic standards (SM2) - currently disabled
+**`NHPAgent`** (`NHPAgent.ts`) — High-level SDK class:
 
-- **utils.js** - Utility functions: base64 encoding, zlib compression via CompressionStream API
+- `init()` — generates or loads key pair
+- `setIdentity({ userId, deviceId, organizationId })` — set knock identity
+- `addServer({ publicKey, host, port })` — register an NHP server
+- `knockResource({ resourceId, serviceId, serverHost, serverPort })` — returns `KnockResult`
+- `close()` — disconnect and cleanup
+- Transport auto-selected: `relay` in browser (requires `relayUrl`), `udp` in Node.js
 
-### Key Dependencies
+**`buildNHPPacket(type, privKey, pubKey, remotePubKey, message, compress, cipherScheme)`** — builds binary NHP packet. Both keys and remote key are base64 strings.
 
-- `@noble/ciphers` - ChaCha20-Poly1305 AEAD
-- `@noble/curves` - Elliptic curve operations
-- `crypto-js` - SHA-256 and HMAC
-- `gm-crypto` - SM2/SM3/SM4 (Chinese cryptography standards)
+**`parseNHPPacket(packet, privKey, pubKey, remotePubKey)`** — decrypts and validates an ACK or COK packet. Throws on HMAC failure, wrong size, replay, or stale timestamp.
 
-### Demo Page (`/index.html`)
+### Protocol
 
-Static single-file demo with:
-- Tailwind CSS (CDN)
-- Built-in i18n system with translations object
-- Okta OAuth integration for authentication
-- Connection to `acdemo.opennhp.org` protected server
+4-step handshake (Noise-protocol-inspired):
+
+1. Agent → Server: **KNK** (knock with identity + resource)
+2. Server → Agent: **COK** (optional, server overloaded — contains cookie)
+3. Agent → Server: **RNK** (re-knock with cookie in HMAC)
+4. Server → Agent: **ACK** (access granted, contains resource hosts + expiry)
+
+### Cipher schemes
+
+| Scheme | Key Exchange | Hash | AEAD | Header |
+| ------ | ------------ | ---- | ---- | ------ |
+| `curve25519` (default) | X25519 ECDH | Blake2s-256 | AES-256-GCM | 240 bytes |
+| `gmsm` | SM2 ECDH | SM3 | SM4-GCM | 304 bytes |
+
+Auto-detection: if public key base64 length > 50 chars → `gmsm`, otherwise `curve25519`.
+
+**Important:** `parseNHPPacket` routes to GMSM parser by reading the `extended` flag bit at header offset 10–11 (big-endian uint16, bit 0x1). Do not change this to little-endian.
+
+### Key dependencies
+
+- `@noble/ciphers` — AES-256-GCM
+- `@noble/curves` — X25519
+- `@noble/hashes` — Blake2s
+- `sm-crypto-v2` — SM2/SM3/SM4
+
+### Test layout (`nhp-js/test/`)
+
+```text
+test/
+├── crypto/
+│   ├── aead.test.ts    # AES-256-GCM round-trip and error cases
+│   ├── ecdh.test.ts    # X25519 key gen, ECDH, Go test vectors
+│   ├── gmsm.test.ts    # SM2/SM3/SM4 operations
+│   └── noise.test.ts   # Blake2s, HMAC, key derivation
+└── protocol/
+    ├── header.test.ts  # NHPHeader / NHPHeaderEx field read-write
+    └── packet.test.ts  # buildNHPPacket/parseNHPPacket round-trips,
+                        # COK/RNK flow, error cases, anti-replay, GMSM
+```
+
+### Known issues / gotchas
+
+- **UDP and zlib** use Node.js built-ins (`dgram`, `zlib`). Vite externalizes them for browser builds — this is expected. Browser zlib uses `CompressionStream` API (see `utils.ts`).
+- **`main.js`** is a manual debug entry point for the Vite dev server, not a production file. It is excluded from ESLint.
+- **`resetGlobalCounter()`** is exported for test isolation — call it in `beforeEach` when writing packet tests to avoid counter-dependent failures. It also clears the internal `lastBuildChainKeyMap`.
+- **Noise chain key between KNK and ACK is all-zeros.** Both Go server (`decryptBody` defer) and Go agent (`encryptBody` defer) clear `chainKey` after processing. The JS agent passes `new Uint8Array(32)` as `prevChainKey` when parsing ACK responses to match this behavior. Do not change this without updating both Go and JS sides.
+- **Relay transport response matching** uses the inner packet's counter (header bytes `[16:24]`, big-endian uint64) to correlate HTTP requests with UDP responses. The relay does not decrypt ACK/COK packets — it forwards raw encrypted bytes.
+- **`errCode: "0"` means success** in the NHP protocol. The `parseAckResponse` method treats `"0"` and `""` as success; any other value is an error.
 
 ## Deployment
 
-The root `index.html` is deployed via GitHub Pages to `js-agent.opennhp.org`. The CNAME file configures the custom domain.
+`/index.html` auto-deploys to `js-agent.opennhp.org` via GitHub Pages on push to `main`. CI (`.github/workflows/ci.yml`) runs build + tests on Node.js 18, 20, 22 for every push and PR.
