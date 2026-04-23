@@ -4,6 +4,21 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NHP Relay Transport Test</title>
+
+  <!-- Resolve bare specifiers the SDK build leaves external (@noble/*). -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@noble/ciphers":  "https://esm.sh/@noble/ciphers@2.1.1",
+      "@noble/ciphers/": "https://esm.sh/@noble/ciphers@2.1.1/",
+      "@noble/curves":   "https://esm.sh/@noble/curves@2.0.1",
+      "@noble/curves/":  "https://esm.sh/@noble/curves@2.0.1/",
+      "@noble/hashes":   "https://esm.sh/@noble/hashes@1.7.2",
+      "@noble/hashes/":  "https://esm.sh/@noble/hashes@1.7.2/"
+    }
+  }
+  </script>
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -158,19 +173,6 @@
     <div class="panel-title">&#9881; Configuration</div>
     <div class="row">
       <div class="field" style="flex:2">
-        <label>Relay URL</label>
-        <input id="relayUrl" type="text" value="http://localhost:8080/relay" placeholder="https://relay.example.com/relay">
-      </div>
-      <div class="field">
-        <label>Cipher Scheme</label>
-        <select id="cipherScheme">
-          <option value="curve25519">CURVE25519</option>
-          <option value="gmsm">GMSM (SM2/SM3/SM4)</option>
-        </select>
-      </div>
-    </div>
-    <div class="row">
-      <div class="field" style="flex:2">
         <label>Server Public Key (Base64)</label>
         <input id="serverPubKey" type="text" placeholder="E3o8gUUxI5dUAUiEOi6SvgV9bWKmjpWWQaOO6GChO2A=">
       </div>
@@ -178,44 +180,27 @@
     <div class="row">
       <div class="field" style="flex:2">
         <label>Agent Private Key (Base64)</label>
-        <input id="agentPrivKey" type="text" placeholder="Click Generate to create a key pair">
+        <input id="agentPrivKey" type="text" placeholder="Paste an existing Agent private key">
       </div>
       <div class="field" style="flex:2">
         <label>Agent Public Key (register this in server's agent.toml)</label>
         <input id="agentPubKey" type="text" readonly style="color:#3fb950; cursor:default;">
       </div>
-      <div class="field" style="flex:0; min-width:auto; align-self:flex-end;">
-        <button class="btn btn-secondary" onclick="genKeyPair()" style="white-space:nowrap;">Generate Key Pair</button>
-      </div>
     </div>
     <div class="row">
-      <div class="field">
-        <label>User ID</label>
-        <input id="userId" type="text" value="test@example.com">
-      </div>
-      <div class="field">
-        <label>Device ID</label>
-        <input id="deviceId" type="text" value="browser-relay-test">
-      </div>
-      <div class="field">
-        <label>Organization ID</label>
-        <input id="orgId" type="text" value="opennhp.org">
-      </div>
-    </div>
-    <div class="row">
-      <div class="field">
-        <label>Resource ID</label>
-        <input id="resourceId" type="text" value="demo">
-      </div>
-      <div class="field">
-        <label>Service ID</label>
-        <input id="serviceId" type="text" value="demo-service">
-      </div>
       <div class="field">
         <label>Timeout (ms)</label>
         <input id="timeoutMs" type="number" value="10000">
       </div>
     </div>
+    <!-- Hardcoded values (hidden from UI) -->
+    <input id="cipherScheme" type="hidden" value="curve25519">
+    <input id="relayUrl" type="hidden" value="https://relay.opennhp.org/relay">
+    <input id="userId" type="hidden" value="test@example.com">
+    <input id="deviceId" type="hidden" value="browser-relay-test">
+    <input id="orgId" type="hidden" value="opennhp.org">
+    <input id="resourceId" type="hidden" value="demo">
+    <input id="serviceId" type="hidden" value="example">
   </div>
 
   <!-- Status & Actions -->
@@ -237,7 +222,7 @@
     <div class="seq-diagram" id="seqDiagram">
       <div class="seq-step" id="seq-init">
         <div class="seq-dot" id="dot-init"></div>
-        <span>Initialize NHPAgent (generate key pair)</span>
+        <span>Initialize NHPAgent (load key pair)</span>
       </div>
       <div class="seq-step" id="seq-identity">
         <div class="seq-dot" id="dot-identity"></div>
@@ -270,7 +255,7 @@
 </div>
 
 <script type="module">
-  import { NHPAgent, generateX25519KeyPairBase64 } from '../dist/index.js';
+  import { NHPAgent } from '../dist/index.js';
 
   const logEl = document.getElementById('log');
   const statusDot = document.getElementById('statusDot');
@@ -279,9 +264,8 @@
 
   const STORAGE_KEY = 'nhp-relay-test';
 
-  // Persist all form fields to localStorage
-  const FIELD_IDS = ['relayUrl','cipherScheme','serverPubKey',
-    'agentPrivKey','userId','deviceId','orgId','resourceId','serviceId','timeoutMs'];
+  // Persist visible form fields to localStorage
+  const FIELD_IDS = ['serverPubKey','agentPrivKey','timeoutMs'];
 
   function saveFields() {
     const data = {};
@@ -312,6 +296,33 @@
 
   // Load saved fields on startup
   loadFields();
+
+  // Best-effort: load deployment-provided defaults from config.json (written by
+  // CI next to this page). Only applies to fields the user hasn't set yet so
+  // localStorage edits are respected.
+  async function loadDefaultsFromConfig() {
+    try {
+      const r = await fetch('./config.json', { cache: 'no-store' });
+      if (!r.ok) return;
+      const cfg = await r.json();
+      const apply = (id, v) => {
+        const el = document.getElementById(id);
+        if (el && v != null && !el.value) el.value = v;
+      };
+      apply('serverPubKey', cfg.serverPublicKey);
+      apply('agentPrivKey', cfg.agentPrivateKey);
+      apply('relayUrl',     cfg.relayUrl);
+      apply('cipherScheme', cfg.cipherScheme);
+      apply('userId',       cfg.userId);
+      apply('deviceId',     cfg.deviceId);
+      apply('orgId',        cfg.orgId);
+      apply('resourceId',   cfg.resourceId);
+      apply('serviceId',    cfg.serviceId);
+    } catch {
+      // config.json is optional (local dev); ignore
+    }
+  }
+  loadDefaultsFromConfig();
 
   function val(id) { return document.getElementById(id).value.trim(); }
 
@@ -345,24 +356,6 @@
     });
   }
 
-  window.genKeyPair = function() {
-    try {
-      const kp = generateX25519KeyPairBase64();
-      document.getElementById('agentPrivKey').value = kp.privateKey;
-      document.getElementById('agentPubKey').value = kp.publicKey;
-      saveFields();
-      log('ok', 'Key pair generated and saved (X25519)');
-      log('info', `  Private Key = ${kp.privateKey}`);
-      log('info', `  Public Key  = ${kp.publicKey}`);
-      log('warn', `  >>> Register this public key in NHP Server agent.toml:`);
-      log('data', `  [[Agents]]`);
-      log('data', `  PubKeyBase64 = "${kp.publicKey}"`);
-      log('data', `  ExpireTime = 1924991999`);
-    } catch (err) {
-      log('err', `Key generation failed: ${err.message}`);
-    }
-  };
-
   window.clearLog = function() {
     logEl.innerHTML = '';
     timingEl.textContent = '';
@@ -390,8 +383,8 @@
     // Clear previous agent pubkey display
     document.getElementById('agentPubKey').value = '';
 
-    if (!relayUrl) { log('err', 'Relay URL is required'); btn.disabled = false; return; }
     if (!serverPubKey) { log('err', 'Server Public Key is required'); btn.disabled = false; return; }
+    if (!agentPrivKey) { log('err', 'Agent Private Key is required'); btn.disabled = false; return; }
 
     const t0 = performance.now();
     setStatus('busy', 'Knocking...');
@@ -403,14 +396,10 @@
         cipherScheme,
         transport: 'relay',
         relayUrl,
+        privateKey: agentPrivKey,
         logLevel: 'debug',
       };
-      if (agentPrivKey) {
-        agentCfg.privateKey = agentPrivKey;
-        log('info', `Creating NHPAgent (cipher=${cipherScheme}, transport=relay, privateKey=provided)`);
-      } else {
-        log('info', `Creating NHPAgent (cipher=${cipherScheme}, transport=relay, key=auto-generate)`);
-      }
+      log('info', `Creating NHPAgent (cipher=${cipherScheme}, transport=relay)`);
       log('data', `  relayUrl = ${relayUrl}`);
 
       const agent = new NHPAgent(agentCfg);
@@ -497,6 +486,19 @@
         log('ok', `  agentAddress = ${result.agentAddress}`);
         if (result.accessToken) log('ok', `  accessToken  = ${result.accessToken}`);
         if (result.preAccessUrl) log('ok', `  preAccessUrl = ${result.preAccessUrl}`);
+
+        // Redirect to the first resource host returned by the server
+        const hosts = result.resourceHosts || {};
+        const firstHost = Object.values(hosts)[0];
+        if (firstHost) {
+          const redirectUrl = `https://${firstHost}`;
+          log('info', `Redirecting to ${redirectUrl} in 2 seconds...`);
+          setTimeout(() => {
+            window.location.href = redirectUrl;
+          }, 2000);
+        } else {
+          log('warn', 'No resource host in ACK response — skipping redirect');
+        }
       } else {
         setStep('done', 'error');
         setStatus('err', `Failed: ${result.error} (${elapsed}ms)`);
@@ -525,12 +527,12 @@
 
   // Log ready
   log('info', 'Relay test page loaded');
+  log('data', `Relay URL: ${val('relayUrl')}`);
   log('data', 'Flow: Browser → NHPAgent(relay) → POST /relay → NHP Server (UDP) → ACK → Browser');
-  if (val('agentPrivKey') && val('agentPubKey')) {
-    log('ok', `Restored saved key pair from localStorage`);
-    log('info', `  Public Key = ${val('agentPubKey')}`);
+  if (val('agentPrivKey')) {
+    log('ok', `Restored saved agent private key from localStorage`);
   } else {
-    log('warn', 'No saved key pair — click "Generate Key Pair" to create one');
+    log('warn', 'Paste Server Public Key and Agent Private Key to knock');
   }
 </script>
 </body>
